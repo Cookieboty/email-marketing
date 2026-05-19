@@ -12,6 +12,7 @@ interface CampaignForSnapshot {
   tagFilterMode: string | null;
   segmentId: string | null;
   subscriptionCategory: string | null;
+  topicId: string | null;
   isAbTest: boolean;
   segment: { id: string; conditions: Prisma.JsonValue } | null;
   variants: Array<{ id: string; samplePercentage: number }>;
@@ -82,6 +83,13 @@ export async function snapshotRecipients(
         ],
       });
     }
+  }
+
+  // 主题级粗筛：排除已退订该主题的用户（spec/unsubscribe-topic-level.md）
+  if (campaign.topicId) {
+    andClauses.push({
+      topicUnsubscribes: { none: { topicId: campaign.topicId } },
+    });
   }
 
   if (andClauses.length > 0) {

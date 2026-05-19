@@ -1,8 +1,9 @@
 /**
- * 公开退订端点（specs/modules/preference-center.md §126-205）。
+ * 公开退订端点（specs/modules/preference-center.md §126-205 + specs/modules/unsubscribe-topic-level.md）。
  *
  * 路由：
  *   GET  /api/unsubscribe?token=...&category=slug   — 渲染 HTML 落地页（用户点击邮件链接）
+ *   GET  /api/unsubscribe?token=...&topic=slug      — 主题退订落地页
  *   POST /api/unsubscribe                            — JSON / form 提交（一键退订 + 站内 fetch）
  *
  * 安全：
@@ -10,9 +11,11 @@
  *  - 不依赖 cookie / origin；token 即凭证
  *  - 限流：以 IP 维度，每 60 秒最多 30 次（防止扫描 token），同时对失败做退避
  *
+ * 优先级：同时传 topic 和 category 时，topic 优先（更细粒度）。
+ *
  * 一键退订 (RFC 8058)：
  *  邮件客户端会发起 `POST` 且 body 为 `List-Unsubscribe=One-Click`，
- *  此时 token / category 必须从 URL query 读取。
+ *  此时 token / category / topic 必须从 URL query 读取。
  */
 
 import { NextResponse } from "next/server";
@@ -34,6 +37,7 @@ const PostBodySchema = z
   .object({
     token: TokenSchema.optional(),
     category: SlugSchema.optional(),
+    topic: SlugSchema.optional(),
   })
   .strict()
   .partial();
@@ -81,16 +85,24 @@ function checkRateLimit(headers: Headers): void {
   rl.recordFailure(ip);
 }
 
-async function readPostInputs(request: Request): Promise<{ token: string; category?: string }> {
+interface PostInputs {
+  token: string;
+  category?: string;
+  topic?: string;
+}
+
+async function readPostInputs(request: Request): Promise<PostInputs> {
   const url = new URL(request.url);
   // 1) 优先 URL query（一键退订 RFC 8058 走 query + form 固定值 body）
   const queryToken = url.searchParams.get("token") ?? undefined;
   const queryCategory = url.searchParams.get("category") ?? undefined;
+  const queryTopic = url.searchParams.get("topic") ?? undefined;
 
   // 2) 其次 body（form 或 JSON）
   const ct = request.headers.get("content-type") ?? "";
   let bodyToken: string | undefined;
   let bodyCategory: string | undefined;
+  let bodyTopic: string | undefined;
   if (ct.includes("application/json")) {
     let raw: unknown;
     try {
@@ -102,6 +114,7 @@ async function readPostInputs(request: Request): Promise<{ token: string; catego
       const parsed = PostBodySchema.parse(raw);
       bodyToken = parsed.token;
       bodyCategory = parsed.category;
+      bodyTopic = parsed.topic;
     } catch (e) {
       if (e instanceof ZodError)
         throw new ValidationError("Validation failed", e.issues);
@@ -114,16 +127,20 @@ async function readPostInputs(request: Request): Promise<{ token: string; catego
     const form = await request.formData();
     const t = form.get("token");
     const c = form.get("category");
+    const tp = form.get("topic");
     if (typeof t === "string") bodyToken = t;
     if (typeof c === "string") bodyCategory = c;
+    if (typeof tp === "string") bodyTopic = tp;
   }
 
   const token = queryToken ?? bodyToken;
   const category = queryCategory ?? bodyCategory;
+  const topic = queryTopic ?? bodyTopic;
   if (!token) throw new ValidationError("token is required");
   TokenSchema.parse(token);
   if (category) SlugSchema.parse(category);
-  return { token, category };
+  if (topic) SlugSchema.parse(topic);
+  return { token, category, topic };
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -135,6 +152,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const token = url.searchParams.get("token") ?? "";
   const categoryRaw = url.searchParams.get("category") ?? undefined;
+  const topicRaw = url.searchParams.get("topic") ?? undefined;
   if (!token) {
     return htmlPage(
       "退订链接无效",
@@ -143,9 +161,11 @@ export async function GET(request: Request): Promise<NextResponse> {
     );
   }
   let category: string | undefined;
+  let topic: string | undefined;
   try {
     TokenSchema.parse(token);
     if (categoryRaw) category = SlugSchema.parse(categoryRaw);
+    if (topicRaw) topic = SlugSchema.parse(topicRaw);
   } catch {
     return htmlPage(
       "退订链接无效",
@@ -155,6 +175,38 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 
   try {
+    // 优先级：topic > category > global
+    if (topic) {
+      const out = await subscriptionUnsubscribeService.unsubscribeByTopic({
+        token,
+        topicSlug: topic,
+        req: { headers: request.headers },
+      });
+      switch (out.status) {
+        case "topic_unsubscribed":
+          return htmlPage(
+            "已退订该主题",
+            out.alreadyUnsubscribed
+              ? `<h1>您已退订</h1><p>您此前已退订「${escapeHtml(out.topic.name)}」主题，本次操作无变化。</p>`
+              : `<h1>退订成功</h1><p>您已成功退订「${escapeHtml(out.topic.name)}」主题，仍可继续接收其他主题与分类的邮件。</p>`,
+            200,
+          );
+        case "topic_not_found":
+          return htmlPage(
+            "主题不存在",
+            "<h1>主题已下线</h1><p>该主题已被移除，本次操作未生效。如需全局退订，请使用邮件中的「退订所有邮件」链接。</p>",
+            404,
+          );
+        case "user_not_found":
+        default:
+          return htmlPage(
+            "退订链接无效",
+            "<h1>退订链接无效</h1><p>未找到匹配的订阅记录，链接可能已失效。</p>",
+            404,
+          );
+      }
+    }
+
     const out = await subscriptionUnsubscribeService.byToken({
       token,
       categorySlug: category ?? null,
@@ -203,7 +255,37 @@ export async function GET(request: Request): Promise<NextResponse> {
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     checkRateLimit(request.headers);
-    const { token, category } = await readPostInputs(request);
+    const { token, category, topic } = await readPostInputs(request);
+
+    // 优先级：topic > category > global
+    if (topic) {
+      const out = await subscriptionUnsubscribeService.unsubscribeByTopic({
+        token,
+        topicSlug: topic,
+        req: { headers: request.headers },
+      });
+      switch (out.status) {
+        case "topic_unsubscribed":
+          return NextResponse.json({
+            ok: true,
+            status: "topic_unsubscribed",
+            slug: out.topic.slug,
+            already: out.alreadyUnsubscribed,
+          });
+        case "topic_not_found":
+          return NextResponse.json(
+            { ok: false, status: "topic_not_found", slug: out.slug },
+            { status: 404 },
+          );
+        case "user_not_found":
+        default:
+          return NextResponse.json(
+            { ok: false, status: "user_not_found", code: "not_found" },
+            { status: 404 },
+          );
+      }
+    }
+
     const out = await subscriptionUnsubscribeService.byToken({
       token,
       categorySlug: category ?? null,

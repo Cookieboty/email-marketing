@@ -4,7 +4,7 @@
  * 偏好中心客户端组件。
  *
  * 数据流：
- *  1. GET /api/preferences/[token] → 用户屏蔽信息 + 全部分类视图
+ *  1. GET /api/preferences/[token] → 用户屏蔽信息 + 全部分类视图 + 全部主题视图
  *  2. 本地 draft Map 反映用户勾选意图；提交差异到 PATCH
  *  3. PATCH 同时支持 resubscribeAll 一键重新订阅（仅在用户曾全局退订时显示按钮）
  *
@@ -29,6 +29,16 @@ interface UserSubscriptionView {
   persisted: boolean;
 }
 
+interface UserTopicView {
+  topic: {
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+  };
+  subscribed: boolean;
+}
+
 interface PreferencesResponse {
   ok: boolean;
   user: {
@@ -38,6 +48,7 @@ interface PreferencesResponse {
     unsubscribedAt: string | null;
   };
   subscriptions: UserSubscriptionView[];
+  topics: UserTopicView[];
 }
 
 async function fetchJson(url: string): Promise<PreferencesResponse> {
@@ -55,6 +66,7 @@ export default function PreferencesClient({ token }: { token: string }) {
   const { data, error, isLoading, mutate } = useSWR<PreferencesResponse>(url, fetchJson);
 
   const [draft, setDraft] = useState<Map<string, boolean>>(new Map());
+  const [topicDraft, setTopicDraft] = useState<Map<string, boolean>>(new Map());
   const [saving, setSaving] = useState(false);
   const [tip, setTip] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
@@ -63,6 +75,9 @@ export default function PreferencesClient({ token }: { token: string }) {
     const next = new Map<string, boolean>();
     for (const row of data.subscriptions) next.set(row.category.id, row.subscribed);
     setDraft(next);
+    const tnext = new Map<string, boolean>();
+    for (const row of data.topics) tnext.set(row.topic.id, row.subscribed);
+    setTopicDraft(tnext);
   }, [data]);
 
   const changes = useMemo(
@@ -71,6 +86,12 @@ export default function PreferencesClient({ token }: { token: string }) {
         ? data.subscriptions.filter((r) => draft.get(r.category.id) !== r.subscribed)
         : [],
     [data, draft],
+  );
+
+  const topicChanges = useMemo(
+    () =>
+      data ? data.topics.filter((r) => topicDraft.get(r.topic.id) !== r.subscribed) : [],
+    [data, topicDraft],
   );
 
   if (isLoading) {
@@ -89,6 +110,7 @@ export default function PreferencesClient({ token }: { token: string }) {
 
   async function patch(payload: {
     subscriptions?: { categoryId: string; subscribed: boolean }[];
+    topics?: { topicId: string; subscribed: boolean }[];
     resubscribeAll?: boolean;
   }) {
     setSaving(true);
@@ -123,8 +145,13 @@ export default function PreferencesClient({ token }: { token: string }) {
     const next = new Map<string, boolean>();
     for (const row of data.subscriptions) next.set(row.category.id, row.subscribed);
     setDraft(next);
+    const tnext = new Map<string, boolean>();
+    for (const row of data.topics) tnext.set(row.topic.id, row.subscribed);
+    setTopicDraft(tnext);
     setTip(null);
   }
+
+  const totalChanges = changes.length + topicChanges.length;
 
   return (
     <div className="space-y-6">
@@ -207,15 +234,68 @@ export default function PreferencesClient({ token }: { token: string }) {
         )}
       </section>
 
+      <section>
+        <h2 className="mb-2 text-base font-medium">活动主题</h2>
+        <p className="mb-2 text-xs text-muted-foreground">
+          您可以单独退订某个营销活动或定时提醒系列。退订主题不会影响其他主题或分类邮件。
+        </p>
+        {data.topics.length === 0 ? (
+          <p className="text-sm text-muted-foreground">暂无可管理的活动主题。</p>
+        ) : (
+          <ul className="divide-y rounded-md border">
+            {data.topics.map((row) => {
+              const checked = topicDraft.get(row.topic.id) ?? row.subscribed;
+              const locked = data.user.unsubscribed;
+              return (
+                <li
+                  key={row.topic.id}
+                  className="flex items-start justify-between gap-4 p-3"
+                >
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium">{row.topic.name}</span>
+                      <span className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        {row.topic.slug}
+                      </span>
+                    </div>
+                    {row.topic.description ? (
+                      <p className="text-xs text-muted-foreground">
+                        {row.topic.description}
+                      </p>
+                    ) : null}
+                  </div>
+                  <label className="flex shrink-0 items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={locked}
+                      onChange={(e) => {
+                        const next = new Map(topicDraft);
+                        next.set(row.topic.id, e.target.checked);
+                        setTopicDraft(next);
+                        setTip(null);
+                      }}
+                    />
+                    <span className={locked ? "text-muted-foreground" : ""}>
+                      订阅
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
       <section className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          {changes.length > 0 ? `有 ${changes.length} 项变更未保存` : "无变更"}
+          {totalChanges > 0 ? `有 ${totalChanges} 项变更未保存` : "无变更"}
         </p>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={reset}
-            disabled={changes.length === 0 || saving}
+            disabled={totalChanges === 0 || saving}
             className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
           >
             重置
@@ -224,13 +304,23 @@ export default function PreferencesClient({ token }: { token: string }) {
             type="button"
             onClick={() =>
               patch({
-                subscriptions: changes.map((c) => ({
-                  categoryId: c.category.id,
-                  subscribed: draft.get(c.category.id) ?? c.subscribed,
-                })),
+                subscriptions:
+                  changes.length > 0
+                    ? changes.map((c) => ({
+                      categoryId: c.category.id,
+                      subscribed: draft.get(c.category.id) ?? c.subscribed,
+                    }))
+                    : undefined,
+                topics:
+                  topicChanges.length > 0
+                    ? topicChanges.map((c) => ({
+                      topicId: c.topic.id,
+                      subscribed: topicDraft.get(c.topic.id) ?? c.subscribed,
+                    }))
+                    : undefined,
               })
             }
-            disabled={changes.length === 0 || saving}
+            disabled={totalChanges === 0 || saving}
             className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
           >
             {saving ? "保存中…" : "保存偏好"}
@@ -240,9 +330,8 @@ export default function PreferencesClient({ token }: { token: string }) {
 
       {tip ? (
         <p
-          className={`text-sm ${
-            tip.kind === "ok" ? "text-emerald-600" : "text-destructive"
-          }`}
+          className={`text-sm ${tip.kind === "ok" ? "text-emerald-600" : "text-destructive"
+            }`}
         >
           {tip.text}
         </p>

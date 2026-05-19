@@ -6,6 +6,7 @@ import { render } from "@/lib/template-engine";
 import { logger } from "@/lib/logger";
 import { isSuppressed } from "@/lib/modules/suppression/check";
 import { isOverLimit } from "@/lib/modules/frequency/check";
+import { evaluateDeliverability } from "@/lib/modules/subscription-category/unsubscribe";
 import { campaignService } from "./service";
 import { snapshotRecipients } from "./snapshot";
 import { transformHtml } from "./html-transform";
@@ -57,7 +58,7 @@ export async function processSendQueue(): Promise<void> {
     where: { status: "SENDING" },
     orderBy: { createdAt: "asc" },
     take: 1,
-    include: { variants: true },
+    include: { variants: true, topic: true },
   });
 
   if (campaigns.length === 0) return;
@@ -78,9 +79,9 @@ export async function processSendQueue(): Promise<void> {
 
   const subscriptionCategory = campaign.subscriptionCategory
     ? await prisma.subscriptionCategory.findUnique({
-        where: { slug: campaign.subscriptionCategory },
-        select: { isTransactional: true },
-      })
+      where: { slug: campaign.subscriptionCategory },
+      select: { isTransactional: true },
+    })
     : null;
 
   const utmParams = campaign.utmParams as Record<string, string> | null;
@@ -115,8 +116,12 @@ export async function processSendQueue(): Promise<void> {
     const subject = r.variant?.subject ?? snapshot.subject;
     const htmlContent = r.variant?.htmlContent ?? snapshot.htmlContent;
     const unsubscribeUrl = `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}`;
+    const unsubscribeTopicUrl = campaign.topic
+      ? `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}&topic=${encodeURIComponent(campaign.topic.slug)}`
+      : "";
     const builtin = {
       unsubscribeUrl,
+      unsubscribeTopicUrl,
       userEmail: r.user.email,
       userName: r.user.name ?? "",
       campaignName: campaign.name,
@@ -133,7 +138,8 @@ export async function processSendQueue(): Promise<void> {
 
     const headers: Record<string, string> = {};
     if (!subscriptionCategory?.isTransactional) {
-      headers["List-Unsubscribe"] = `<${unsubscribeUrl}>`;
+      const listUnsubUrl = unsubscribeTopicUrl || unsubscribeUrl;
+      headers["List-Unsubscribe"] = `<${listUnsubUrl}>`;
       headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
     }
 
@@ -304,7 +310,7 @@ export async function automationRunProcessor(): Promise<void> {
   const runs = await prisma.automationRun.findMany({
     where: { status: "SCHEDULED", scheduledAt: { lte: new Date() } },
     include: {
-      automation: { include: { template: true } },
+      automation: { include: { template: true, topic: true } },
       user: { select: { id: true, email: true, name: true, unsubscribed: true, totalBounceCount: true, unsubscribeToken: true } },
     },
     take: 50,
@@ -312,8 +318,18 @@ export async function automationRunProcessor(): Promise<void> {
 
   for (const run of runs) {
     try {
-      if (run.user.unsubscribed || run.user.totalBounceCount >= 3) {
+      if (run.user.totalBounceCount >= 3) {
         await prisma.automationRun.update({ where: { id: run.id }, data: { status: "SKIPPED", failureReason: "user_ineligible" } });
+        continue;
+      }
+      const deliverability = await evaluateDeliverability(run.user.id, {
+        topicId: run.automation.topicId ?? null,
+      });
+      if (!deliverability.allowed) {
+        await prisma.automationRun.update({
+          where: { id: run.id },
+          data: { status: "SKIPPED", failureReason: deliverability.reason ?? "ineligible" },
+        });
         continue;
       }
       if (await isSuppressed(run.user.email)) {
@@ -330,14 +346,23 @@ export async function automationRunProcessor(): Promise<void> {
       const subject = template ? template.subject : run.automation.subject;
       const htmlContent = template?.htmlContent ?? `<p>${run.automation.subject}</p>`;
       const unsubscribeUrl = `${e.APP_URL}/api/unsubscribe?token=${run.user.unsubscribeToken}`;
-      const builtin = { unsubscribeUrl, userEmail: run.user.email, userName: run.user.name ?? "", campaignName: run.automation.name };
+      const unsubscribeTopicUrl = run.automation.topic
+        ? `${e.APP_URL}/api/unsubscribe?token=${run.user.unsubscribeToken}&topic=${encodeURIComponent(run.automation.topic.slug)}`
+        : "";
+      const builtin = {
+        unsubscribeUrl,
+        unsubscribeTopicUrl,
+        userEmail: run.user.email,
+        userName: run.user.name ?? "",
+        campaignName: run.automation.name,
+      };
 
       const result = await sendSingle({
         from: e.EMAIL_FROM ?? "",
         to: run.user.email,
         subject: render(subject, {}, { builtin }),
         html: render(htmlContent, {}, { builtin }),
-        headers: { "List-Unsubscribe": `<${unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+        headers: { "List-Unsubscribe": `<${unsubscribeTopicUrl || unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
         tags: [{ name: "automation_id", value: run.automationId }],
       });
 
@@ -348,7 +373,7 @@ export async function automationRunProcessor(): Promise<void> {
       }
     } catch (err) {
       log.error("automation run failed", { runId: run.id, error: err instanceof Error ? err.message : String(err) });
-      await prisma.automationRun.update({ where: { id: run.id }, data: { status: "FAILED", failureReason: err instanceof Error ? err.message : "unknown" } }).catch(() => {});
+      await prisma.automationRun.update({ where: { id: run.id }, data: { status: "FAILED", failureReason: err instanceof Error ? err.message : "unknown" } }).catch(() => { });
     }
   }
 }

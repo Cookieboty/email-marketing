@@ -133,13 +133,63 @@ describe("template-engine: builtin set", () => {
     expect(RAW_HTML_VARIABLES.has("unsubscribe_link")).toBe(true);
   });
 
+  it("RAW_HTML_VARIABLES contains unsubscribe_topic_link", () => {
+    expect(RAW_HTML_VARIABLES.has("unsubscribe_topic_link")).toBe(true);
+  });
+
   it("BUILTIN_VARIABLE_NAMES is non-empty and includes core names", () => {
     expect(BUILTIN_VARIABLE_NAMES).toContain("unsubscribe_url");
     expect(BUILTIN_VARIABLE_NAMES).toContain("current_year");
+    expect(BUILTIN_VARIABLE_NAMES).toContain("unsubscribe_topic_url");
+    expect(BUILTIN_VARIABLE_NAMES).toContain("unsubscribe_topic_link");
   });
 
   it("buildBuiltinVariables returns escaped link with default text", () => {
     const v = buildBuiltinVariables({ unsubscribeUrl: "https://x/u" });
     expect(v.unsubscribe_link).toContain('href="https://x/u"');
+  });
+
+  it("buildBuiltinVariables generates topic link only when topic url provided", () => {
+    const empty = buildBuiltinVariables({});
+    expect(empty.unsubscribe_topic_url).toBe("");
+    expect(empty.unsubscribe_topic_link).toBe("");
+
+    const withTopic = buildBuiltinVariables({
+      unsubscribeTopicUrl: "https://x/u?topic=t1",
+    });
+    expect(withTopic.unsubscribe_topic_url).toBe("https://x/u?topic=t1");
+    expect(withTopic.unsubscribe_topic_link).toContain('href="https://x/u?topic=t1"');
+    expect(withTopic.unsubscribe_topic_link).toContain("退订该主题");
+  });
+
+  it("buildBuiltinVariables uses custom topic link text", () => {
+    const v = buildBuiltinVariables({
+      unsubscribeTopicUrl: "https://x/u?topic=t1",
+      unsubscribeTopicLinkText: "Unsubscribe from this topic",
+    });
+    expect(v.unsubscribe_topic_link).toContain("Unsubscribe from this topic");
+  });
+});
+
+describe("template-engine: unsubscribe_topic_link rendering", () => {
+  it("renders raw HTML anchor when topic url provided", () => {
+    const out = render("Topic: {{unsubscribe_topic_link}}", {}, {
+      builtin: { unsubscribeTopicUrl: "https://app.test/u/abc?topic=campaign1" },
+    });
+    expect(out).toContain('<a href="https://app.test/u/abc?topic=campaign1">');
+    expect(out).toContain("退订该主题</a>");
+  });
+
+  it("renders empty when topic url not provided", () => {
+    const out = render("Topic: [{{unsubscribe_topic_link}}]", {}, { builtin: {} });
+    expect(out).toBe("Topic: []");
+  });
+
+  it("escapes unsafe URL characters inside topic link", () => {
+    const out = render("{{unsubscribe_topic_link}}", {}, {
+      builtin: { unsubscribeTopicUrl: 'https://x?topic="</a>' },
+    });
+    expect(out).toContain("&quot;");
+    expect(out).toContain("&lt;/a&gt;");
   });
 });

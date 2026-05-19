@@ -102,6 +102,27 @@ enum AuditActorType {
   WEBHOOK
 }
 
+enum ApiClientStatus {
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum ImportAuthType {
+  NONE
+  BEARER
+  BASIC
+  API_KEY_HEADER
+}
+
+enum ImportJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
 // =====================================================================
 // 1. 用户域（7）
 // =====================================================================
@@ -144,6 +165,7 @@ model User {
   campaignRecipients CampaignRecipient[]
   linkClicks         LinkClick[]
   automationRuns     AutomationRun[]
+  topicUnsubscribes  UserTopicUnsubscribe[]
 
   @@index([unsubscribed, totalBounceCount])
   @@index([birthDate, unsubscribed])
@@ -240,6 +262,40 @@ model SendTimePreference {
   @@map("send_time_preferences")
 }
 
+// ---------------------------------------------------------------------
+// Topic（主题）— 用于 Campaign / Automation / Inbound 系列的细粒度退订
+// 关联 spec：specs/modules/unsubscribe-topic-level.md
+// ---------------------------------------------------------------------
+
+model Topic {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  description String?
+  externalRef String?  @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  campaigns    Campaign[]
+  automations  Automation[]
+  unsubscribes UserTopicUnsubscribe[]
+
+  @@map("topics")
+}
+
+model UserTopicUnsubscribe {
+  userId    String
+  topicId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic Topic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@id([userId, topicId])
+  @@index([topicId])
+  @@map("user_topic_unsubscribes")
+}
+
 // =====================================================================
 // 2. 模板与媒体（3）
 // =====================================================================
@@ -321,6 +377,9 @@ model Campaign {
   tagFilterMode        String?  @default("ANY")
   subscriptionCategory String?
 
+  topicId String?
+  topic   Topic?  @relation(fields: [topicId], references: [id], onDelete: SetNull)
+
   isAbTest     Boolean @default(false)
   abTestConfig Json?
 
@@ -350,6 +409,7 @@ model Campaign {
 
   @@index([status, scheduledAt])
   @@index([templateId])
+  @@index([topicId])
   @@map("campaigns")
 }
 
@@ -553,12 +613,15 @@ model Automation {
   delayMinutes  Int                   @default(0)
   conditions    Json?
   status        AutomationStatus      @default(DISABLED)
+  topicId       String?
+  topic         Topic?                @relation(fields: [topicId], references: [id], onDelete: SetNull)
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
 
   runs AutomationRun[]
 
   @@index([status, triggerType])
+  @@index([topicId])
   @@map("automations")
 }
 
@@ -602,4 +665,141 @@ model AuditLog {
   @@index([action, createdAt])
   @@index([actorType, createdAt])
   @@map("audit_logs")
+}
+
+// =====================================================================
+// 8. Inbound 连接器（2）
+// 关联 spec：specs/modules/inbound-connector.md
+// =====================================================================
+
+model ApiClient {
+  id              String          @id @default(cuid())
+  name            String
+  description     String?
+  status          ApiClientStatus @default(ACTIVE)
+  tokenHash       String          @unique
+  tokenPrefix     String
+  hmacSecretHash  String?
+  hmacSecretEncrypted String?
+  previousTokenHash       String?
+  previousTokenExpiresAt  DateTime?
+  scopes          String[]
+  ipWhitelist     String[]        @default([])
+  rpsLimit        Int?
+  rphLimit        Int?
+  metadata        Json?
+  lastUsedAt      DateTime?
+  createdBy       String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  inboundLogs InboundRequestLog[]
+
+  @@index([status])
+  @@index([tokenPrefix])
+  @@map("api_clients")
+}
+
+model InboundRequestLog {
+  id             String   @id @default(cuid())
+  apiClientId    String
+  idempotencyKey String
+  endpoint       String
+  method         String
+  responseStatus Int
+  responseBody   Json?
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  apiClient ApiClient @relation(fields: [apiClientId], references: [id], onDelete: Cascade)
+
+  @@unique([apiClientId, idempotencyKey])
+  @@index([expiresAt])
+  @@map("inbound_request_logs")
+}
+
+// =====================================================================
+// 9. Outbound Importer（3）
+// 关联 spec：specs/modules/outbound-importer.md
+// =====================================================================
+
+model ImportSource {
+  id          String         @id @default(cuid())
+  name        String
+  description String?
+  baseUrl     String
+  authType    ImportAuthType @default(NONE)
+  authValue   String?
+  authHeader  String?
+  headers     Json?
+
+  paginationType String  @default("offset")
+  pageSize       Int     @default(100)
+  pageSizeParam  String?
+  pageParam      String?
+  cursorParam    String?
+  cursorJsonPath String?
+
+  dataJsonPath String @default("$")
+  fieldMapping Json
+
+  schedule  String?
+  enabled   Boolean   @default(true)
+  lastRunAt DateTime?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  jobs ImportJob[]
+
+  @@index([enabled, lastRunAt])
+  @@map("import_sources")
+}
+
+model ImportJob {
+  id       String          @id @default(cuid())
+  sourceId String
+  status   ImportJobStatus @default(PENDING)
+  isDryRun Boolean         @default(false)
+
+  totalFetched Int @default(0)
+  totalCreated Int @default(0)
+  totalUpdated Int @default(0)
+  totalSkipped Int @default(0)
+  totalErrored Int @default(0)
+
+  cursor      String?
+  currentPage Int     @default(0)
+
+  startedAt     DateTime?
+  completedAt   DateTime?
+  failureReason String?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  source ImportSource     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  errors ImportJobError[]
+
+  @@index([sourceId, status])
+  @@index([status, createdAt])
+  @@map("import_jobs")
+}
+
+model ImportJobError {
+  id      String  @id @default(cuid())
+  jobId   String
+  row     Int
+  field   String?
+  message String
+  rawData Json?
+
+  createdAt DateTime @default(now())
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@map("import_job_errors")
 }

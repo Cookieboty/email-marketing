@@ -17,6 +17,12 @@ import {
   deliverabilityAlertChecker,
   sendTimePreferenceCalculator,
 } from "@/lib/modules/campaign/worker-jobs";
+import { cleanupInboundRequestLogs } from "@/lib/modules/api-client/cleanup";
+import {
+  importTickHandler,
+  importRunHandler,
+  markStaleImportJobs,
+} from "@/lib/modules/import/worker-jobs";
 
 const LOCK_KEY = "email_worker";
 const DRY_RUN = process.env.WORKER_DRY_RUN === "true";
@@ -120,6 +126,7 @@ export function registerSchedules(): ScheduledTask[] {
         await softBounceRetry();
         await campaignCompleter();
         await automationRunProcessor();
+        await importRunHandler();
       });
     }),
   );
@@ -132,6 +139,8 @@ export function registerSchedules(): ScheduledTask[] {
         await campaignStatsAggregator();
         await domainStatAggregator();
         await deliverabilityAlertChecker();
+        await importTickHandler();
+        await markStaleImportJobs();
       });
     }),
   );
@@ -149,6 +158,7 @@ export function registerSchedules(): ScheduledTask[] {
       void runExclusive("daily-3am", async () => {
         await runSegmentDailyRecompute();
         await runEngagementDailyRecompute();
+        await cleanupInboundRequestLogs();
       });
     }),
   );

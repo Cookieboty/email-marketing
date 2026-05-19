@@ -24,13 +24,20 @@ const HTML_ESCAPES: Record<string, string> = {
   "'": "&#39;",
 };
 
-export const RAW_HTML_VARIABLES = new Set<string>(["unsubscribe_link"]);
+export const RAW_HTML_VARIABLES = new Set<string>([
+  "unsubscribe_link",
+  "unsubscribe_topic_link",
+]);
 
 export type MissingStrategy = "empty" | "keep" | "throw";
 
 export interface BuiltinVariableInput {
   unsubscribeUrl?: string;
   unsubscribeLinkText?: string;
+  /** 主题级退订 URL（可选，仅当本封邮件归属某个 Topic 时注入） */
+  unsubscribeTopicUrl?: string;
+  /** 主题级退订链接文案，默认 “退订该主题” */
+  unsubscribeTopicLinkText?: string;
   userEmail?: string;
   userName?: string;
   campaignName?: string;
@@ -62,10 +69,18 @@ export function buildBuiltinVariables(input: BuiltinVariableInput = {}): Record<
     url.length > 0
       ? `<a href="${escapeHtml(url)}">${escapeHtml(linkText)}</a>`
       : "";
+  const topicUrl = input.unsubscribeTopicUrl ?? "";
+  const topicLinkText = input.unsubscribeTopicLinkText ?? "退订该主题";
+  const topicLink =
+    topicUrl.length > 0
+      ? `<a href="${escapeHtml(topicUrl)}">${escapeHtml(topicLinkText)}</a>`
+      : "";
   const year = (input.now ?? new Date()).getFullYear().toString();
   return {
     unsubscribe_url: url,
     unsubscribe_link: link,
+    unsubscribe_topic_url: topicUrl,
+    unsubscribe_topic_link: topicLink,
     user_email: input.userEmail ?? "",
     user_name: input.userName ?? "",
     campaign_name: input.campaignName ?? "",
@@ -119,6 +134,8 @@ export function extractVariables(template: string): string[] {
 export const BUILTIN_VARIABLE_NAMES = [
   "unsubscribe_url",
   "unsubscribe_link",
+  "unsubscribe_topic_url",
+  "unsubscribe_topic_link",
   "user_email",
   "user_name",
   "campaign_name",

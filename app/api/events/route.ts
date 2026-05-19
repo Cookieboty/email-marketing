@@ -11,6 +11,24 @@ export const runtime = "nodejs";
 
 const log = logger.child("events-api");
 
+/**
+ * @deprecated 使用 /api/inbound/events（基于 ApiClient 凭证 + scope 鉴权）。
+ * 本路由保留以兼容旧客户端，自 2026-05-19 起返回 `Deprecation: true` header
+ * 并记录采样 warning（每 100 次取 1 条）。
+ */
+const DEPRECATION_LOG_SAMPLING = 100;
+let deprecationCallCount = 0;
+
+function withDeprecationHeaders(res: NextResponse): NextResponse {
+  res.headers.set("Deprecation", "true");
+  res.headers.set("Sunset", "Wed, 31 Dec 2026 23:59:59 GMT");
+  res.headers.set(
+    "Link",
+    '</api/inbound/events>; rel="successor-version"',
+  );
+  return res;
+}
+
 const EventSchema = z.object({
   eventName: z.string().trim().min(1).max(120),
   userId: z.string().min(1).optional(),
@@ -40,11 +58,20 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
+    deprecationCallCount += 1;
+    if (deprecationCallCount % DEPRECATION_LOG_SAMPLING === 1) {
+      log.warn("/api/events is deprecated; migrate to /api/inbound/events", {
+        callCount: deprecationCallCount,
+      });
+    }
+
     const token = env().EVENT_API_TOKEN;
     if (!token) {
-      return NextResponse.json(
-        { ok: false, error: "Event API not configured" },
-        { status: 503 },
+      return withDeprecationHeaders(
+        NextResponse.json(
+          { ok: false, error: "Event API not configured" },
+          { status: 503 },
+        ),
       );
     }
 
@@ -69,9 +96,11 @@ export async function POST(request: Request): Promise<NextResponse> {
         select: { id: true },
       });
       if (!user) {
-        return NextResponse.json(
-          { ok: false, error: "User not found" },
-          { status: 404 },
+        return withDeprecationHeaders(
+          NextResponse.json(
+            { ok: false, error: "User not found" },
+            { status: 404 },
+          ),
         );
       }
       userId = user.id;
@@ -93,8 +122,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       });
     });
 
-    return NextResponse.json({ ok: true, userId, eventName: input.eventName });
+    return withDeprecationHeaders(
+      NextResponse.json({ ok: true, userId, eventName: input.eventName }),
+    );
   } catch (err) {
-    return handleApiError(err);
+    return withDeprecationHeaders(handleApiError(err));
   }
 }

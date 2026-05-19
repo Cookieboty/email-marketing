@@ -1,9 +1,9 @@
 /**
- * 公开偏好中心 API（specs/modules/preference-center.md）。
+ * 公开偏好中心 API（specs/modules/preference-center.md + specs/modules/unsubscribe-topic-level.md）。
  *
  * 路由：
- *   GET   /api/preferences/[token]  → 当前用户全部分类视图 + 全局退订状态
- *   PATCH /api/preferences/[token]  → 批量更新分类订阅 / 一键全局重新订阅
+ *   GET   /api/preferences/[token]  → 当前用户全部分类视图 + 主题视图 + 全局退订状态
+ *   PATCH /api/preferences/[token]  → 批量更新分类订阅 / 主题订阅 / 一键全局重新订阅
  *
  * 安全：
  *   - 公开路由（middleware 放行 /api/preferences/）
@@ -13,8 +13,8 @@
  *   - 不再依赖 cookie / origin
  *
  * 与 /api/unsubscribe 的差异：
- *   - 这里支持「重新订阅」（unsubscribed=true → false），而 /api/unsubscribe 只能退订
- *   - 这里以 categoryId 为粒度（而 /api/unsubscribe 以 slug 为粒度）
+ *   - 这里支持「重新订阅」（unsubscribed=true → false 与 删除 UserTopicUnsubscribe 行）
+ *   - 这里以 categoryId / topicId 为粒度（而 /api/unsubscribe 以 slug 为粒度）
  */
 
 import { NextResponse } from "next/server";
@@ -50,6 +50,20 @@ const PatchSchema = z
         }),
       )
       .max(100)
+      .optional(),
+    /**
+     * 主题级订阅变更：[{ topicId, subscribed }]
+     * - subscribed=true → 删除 UserTopicUnsubscribe（重新订阅）
+     * - subscribed=false → 创建 UserTopicUnsubscribe（退订该主题）
+     */
+    topics: z
+      .array(
+        z.object({
+          topicId: z.string().min(1),
+          subscribed: z.boolean(),
+        }),
+      )
+      .max(200)
       .optional(),
     /**
      * 全局重新订阅开关：true 时把 user.unsubscribed 置为 false 并清空 unsubscribedAt
@@ -96,6 +110,39 @@ async function findUserByToken(token: string) {
   });
 }
 
+interface TopicView {
+  topic: {
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+  };
+  subscribed: boolean;
+}
+
+/**
+ * 用户主题视图：列出所有 Topic + 是否已退订（subscribed=!exists）。
+ */
+async function listUserTopics(userId: string): Promise<TopicView[]> {
+  const [topics, unsubs] = await Promise.all([
+    prisma.topic.findMany({ orderBy: [{ createdAt: "desc" }] }),
+    prisma.userTopicUnsubscribe.findMany({
+      where: { userId },
+      select: { topicId: true },
+    }),
+  ]);
+  const unsubSet = new Set(unsubs.map((u) => u.topicId));
+  return topics.map((t) => ({
+    topic: {
+      id: t.id,
+      slug: t.slug,
+      name: t.name,
+      description: t.description,
+    },
+    subscribed: !unsubSet.has(t.id),
+  }));
+}
+
 export async function GET(
   request: Request,
   ctx: { params: Promise<{ token: string }> },
@@ -107,7 +154,10 @@ export async function GET(
     const user = await findUserByToken(token);
     if (!user) throw new NotFoundError("Preferences token invalid");
 
-    const subscriptions = await subscriptionCategoryRepository.listUserSubscriptions(user.id);
+    const [subscriptions, topics] = await Promise.all([
+      subscriptionCategoryRepository.listUserSubscriptions(user.id),
+      listUserTopics(user.id),
+    ]);
     return NextResponse.json({
       ok: true,
       user: {
@@ -117,6 +167,7 @@ export async function GET(
         unsubscribedAt: user.unsubscribedAt,
       },
       subscriptions,
+      topics,
     });
   } catch (err) {
     if (err instanceof ZodError) {
@@ -170,6 +221,19 @@ export async function PATCH(
       }
     }
 
+    // ---- 校验主题 ----
+    const topicChanges = input.topics ?? [];
+    if (topicChanges.length > 0) {
+      const ids = Array.from(new Set(topicChanges.map((t) => t.topicId)));
+      if (ids.length !== topicChanges.length) {
+        throw new ValidationError("Duplicate topicId in topics");
+      }
+      const topics = await prisma.topic.findMany({ where: { id: { in: ids } } });
+      if (topics.length !== ids.length) {
+        throw new NotFoundError("One or more topics not found");
+      }
+    }
+
     await prisma.$transaction(async (tx) => {
       if (input.resubscribeAll === true && user.unsubscribed) {
         await tx.user.update({
@@ -185,6 +249,23 @@ export async function PATCH(
           tx,
         );
       }
+      for (const t of topicChanges) {
+        if (t.subscribed) {
+          // 重新订阅：删除退订记录（无记录时不报错）
+          await tx.userTopicUnsubscribe.deleteMany({
+            where: { userId: user.id, topicId: t.topicId },
+          });
+        } else {
+          // 退订：upsert 保证幂等
+          await tx.userTopicUnsubscribe.upsert({
+            where: {
+              userId_topicId: { userId: user.id, topicId: t.topicId },
+            },
+            update: {},
+            create: { userId: user.id, topicId: t.topicId },
+          });
+        }
+      }
     });
 
     audit({
@@ -196,15 +277,19 @@ export async function PATCH(
         emailMasked: maskEmail(user.email),
         resubscribeAll: input.resubscribeAll === true,
         changes: subs.length,
+        topicChanges: topicChanges.length,
       },
       req: { headers: request.headers },
     });
 
-    const subscriptions = await subscriptionCategoryRepository.listUserSubscriptions(user.id);
-    const refreshed = await prisma.user.findUnique({
-      where: { id: user.id },
-      select: { unsubscribed: true, unsubscribedAt: true },
-    });
+    const [subscriptions, topics, refreshed] = await Promise.all([
+      subscriptionCategoryRepository.listUserSubscriptions(user.id),
+      listUserTopics(user.id),
+      prisma.user.findUnique({
+        where: { id: user.id },
+        select: { unsubscribed: true, unsubscribedAt: true },
+      }),
+    ]);
     return NextResponse.json({
       ok: true,
       user: {
@@ -214,6 +299,7 @@ export async function PATCH(
         unsubscribedAt: refreshed?.unsubscribedAt ?? user.unsubscribedAt,
       },
       subscriptions,
+      topics,
     });
   } catch (err) {
     if (err instanceof ZodError) {

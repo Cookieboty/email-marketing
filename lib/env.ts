@@ -53,6 +53,17 @@ const Schema = z.object({
   RATE_LIMIT_TEST_SEND_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
   RATE_LIMIT_EVENT_MAX: z.coerce.number().int().positive().default(600),
   RATE_LIMIT_EVENT_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
+
+  INBOUND_TIMESTAMP_TOLERANCE_SEC: z.coerce.number().int().positive().default(300),
+  INBOUND_REQUEST_LOG_TTL_DAYS: z.coerce.number().int().positive().default(7),
+  INBOUND_DEFAULT_RPS: z.coerce.number().int().positive().default(20),
+  INBOUND_DEFAULT_RPH: z.coerce.number().int().positive().default(3600),
+  INBOUND_TOKEN_GRACE_SEC: z.coerce.number().int().positive().default(300),
+
+  IMPORT_HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  IMPORT_MAX_RESPONSE_BYTES: z.coerce.number().int().positive().default(52_428_800),
+  IMPORT_SOURCE_SECRET_KEY: z.string().optional(),
+  IMPORT_JOB_STALE_MINUTES: z.coerce.number().int().positive().default(60),
 });
 
 export type Env = z.infer<typeof Schema>;
