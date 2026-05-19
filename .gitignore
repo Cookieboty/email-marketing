@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+
+# Environments
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local data
+.docker/
+uploads/
+
+# Tests
+coverage/
+playwright-report/
+test-results/
+.vitest-cache/
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal
+
+# IDE / Tooling local state
+.claude/
+.trae/
+.cursor/
+
+# Internal docs (planning / specs not for public repo)
+docs/

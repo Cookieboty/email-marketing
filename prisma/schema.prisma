@@ -1,0 +1,605 @@
+// =====================================================================
+// Email Marketing Platform — Prisma Schema
+// 阶段 1：22 模型 / 11 枚举 / 完整外键级联与索引策略
+// 对齐 specs §95-292（数据模型 + 状态机 + 枚举）
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// 枚举（11 个）
+// =====================================================================
+
+enum RecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  SOFT_BOUNCED
+  COMPLAINED
+  UNSUBSCRIBED
+  FAILED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  AB_TESTING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum OptInStatus {
+  NOT_REQUIRED
+  PENDING
+  CONFIRMED
+  EXPIRED
+}
+
+enum SuppressionType {
+  EMAIL
+  DOMAIN
+  PATTERN
+}
+
+enum EmailEventType {
+  sent
+  delivered
+  opened
+  clicked
+  bounced
+  complained
+  delivery_delayed
+  failed
+}
+
+enum BounceType {
+  HARD
+  SOFT
+}
+
+enum AutomationTriggerType {
+  USER_CREATED
+  TAG_CHANGED
+  BIRTHDAY
+  REENGAGEMENT
+  CUSTOM_EVENT
+}
+
+enum AutomationStatus {
+  ENABLED
+  DISABLED
+}
+
+enum AutomationRunStatus {
+  SCHEDULED
+  SENT
+  SKIPPED
+  FAILED
+}
+
+enum DeliverabilityAlertType {
+  HIGH_BOUNCE_RATE
+  HIGH_COMPLAINT_RATE
+}
+
+enum AuditActorType {
+  ADMIN
+  SYSTEM
+  WEBHOOK
+}
+
+// =====================================================================
+// 1. 用户域（7）
+// =====================================================================
+
+model User {
+  id         String  @id @default(cuid())
+  externalId String? @unique
+  email      String  @unique
+  name       String?
+  metadata   Json?
+  source     String?
+
+  unsubscribed     Boolean   @default(false)
+  unsubscribedAt   DateTime?
+  unsubscribeToken String    @unique @default(cuid())
+  totalBounceCount Int       @default(0)
+
+  userLevel   String?
+  totalSpend  Decimal?  @db.Decimal(12, 2)
+  orderCount  Int       @default(0)
+  lastOrderAt DateTime?
+
+  engagementScore    Int       @default(0)
+  lastEmailSentAt    DateTime?
+  lastEmailOpenedAt  DateTime?
+  lastEmailClickedAt DateTime?
+
+  optInStatus OptInStatus @default(NOT_REQUIRED)
+  optInToken  String?     @unique
+  optInSentAt DateTime?
+
+  birthDate DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userTags           UserTag[]
+  subscriptions      UserSubscription[]
+  sendTimePreference SendTimePreference?
+  campaignRecipients CampaignRecipient[]
+  linkClicks         LinkClick[]
+  automationRuns     AutomationRun[]
+
+  @@index([unsubscribed, totalBounceCount])
+  @@index([birthDate, unsubscribed])
+  @@index([lastEmailSentAt])
+  @@index([lastEmailOpenedAt])
+  @@map("users")
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userTags UserTag[]
+
+  @@map("tags")
+}
+
+model UserTag {
+  userId String
+  tagId  String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, tagId])
+  @@index([tagId, userId])
+  @@map("user_tags")
+}
+
+model Segment {
+  id               String    @id @default(cuid())
+  name             String
+  description      String?
+  conditions       Json
+  isSystem         Boolean   @default(false)
+  userCount        Int       @default(0)
+  lastCalculatedAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  campaigns Campaign[]
+
+  @@map("segments")
+}
+
+model SubscriptionCategory {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  slug            String   @unique
+  isDefault       Boolean  @default(false)
+  isTransactional Boolean  @default(false)
+  isPreset        Boolean  @default(false)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  subscriptions UserSubscription[]
+
+  @@index([sortOrder])
+  @@map("subscription_categories")
+}
+
+model UserSubscription {
+  id         String   @id @default(cuid())
+  userId     String
+  categoryId String
+  subscribed Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category SubscriptionCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, categoryId])
+  @@map("user_subscriptions")
+}
+
+model SendTimePreference {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  timezone     String   @default("UTC")
+  bestSendHour Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("send_time_preferences")
+}
+
+// =====================================================================
+// 2. 模板与媒体（3）
+// =====================================================================
+
+model EmailTemplate {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  subject     String
+  htmlContent String
+  textContent String?
+  variables   String[]
+  version     Int      @default(1)
+  isArchived  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  campaigns   Campaign[]
+  automations Automation[]
+
+  @@index([isArchived, name])
+  @@map("email_templates")
+}
+
+model MediaAsset {
+  id        String   @id @default(cuid())
+  filename  String
+  mimeType  String
+  size      Int
+  url       String
+  width     Int?
+  height    Int?
+  alt       String?
+  tags      String[]
+  sha256    String?  @unique
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([mimeType])
+  @@index([createdAt])
+  @@index([tags])
+  @@map("media_assets")
+}
+
+model TemplateBlock {
+  id          String   @id @default(cuid())
+  name        String
+  category    String?
+  htmlContent String
+  variables   String[]
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([category])
+  @@map("template_blocks")
+}
+
+// =====================================================================
+// 3. Campaign 与发送（3）
+// =====================================================================
+
+model Campaign {
+  id        String  @id @default(cuid())
+  name      String
+  subject   String
+  fromEmail String
+  replyTo   String?
+
+  templateId String
+  template   EmailTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+
+  templateSnapshot Json
+
+  segmentId String?
+  segment   Segment? @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+
+  tagFilter            String[]
+  tagFilterMode        String?  @default("ANY")
+  subscriptionCategory String?
+
+  isAbTest     Boolean @default(false)
+  abTestConfig Json?
+
+  utmParams Json?
+
+  status      CampaignStatus @default(DRAFT)
+  scheduledAt DateTime?
+
+  totalRecipients  Int @default(0)
+  sentCount        Int @default(0)
+  deliveredCount   Int @default(0)
+  openCount        Int @default(0)
+  clickCount       Int @default(0)
+  bouncedCount     Int @default(0)
+  complainCount    Int @default(0)
+  unsubscribeCount Int @default(0)
+  failedCount      Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  variants   CampaignVariant[]
+  recipients CampaignRecipient[]
+  events     EmailEvent[]
+  linkClicks LinkClick[]
+  alerts     DeliverabilityAlert[]
+
+  @@index([status, scheduledAt])
+  @@index([templateId])
+  @@map("campaigns")
+}
+
+model CampaignVariant {
+  id               String @id @default(cuid())
+  campaignId       String
+  variantName      String
+  subject          String
+  htmlContent      String
+  samplePercentage Int    @default(50)
+  status           String @default("DRAFT")
+
+  totalRecipients  Int @default(0)
+  sentCount        Int @default(0)
+  deliveredCount   Int @default(0)
+  openCount        Int @default(0)
+  clickCount       Int @default(0)
+  bouncedCount     Int @default(0)
+  complainCount    Int @default(0)
+  unsubscribeCount Int @default(0)
+  failedCount      Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaign   Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipients CampaignRecipient[]
+
+  @@index([campaignId])
+  @@map("campaign_variants")
+}
+
+model CampaignRecipient {
+  id            String  @id @default(cuid())
+  campaignId    String
+  userId        String
+  variantId     String?
+  resendEmailId String? @unique
+
+  status     RecipientStatus @default(PENDING)
+  retryCount Int             @default(0)
+  bounceType BounceType?
+
+  lockedBy    String?
+  lockedAt    DateTime?
+  nextRetryAt DateTime?
+
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  openedAt       DateTime?
+  clickedAt      DateTime?
+  bouncedAt      DateTime?
+  complainedAt   DateTime?
+  unsubscribedAt DateTime?
+  failedAt       DateTime?
+
+  metadata Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaign Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variant  CampaignVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  events     EmailEvent[]
+  linkClicks LinkClick[]
+
+  @@index([campaignId, status])
+  @@index([campaignId, lockedBy])
+  @@index([status, nextRetryAt])
+  @@index([userId])
+  @@map("campaign_recipients")
+}
+
+// =====================================================================
+// 4. 事件与追踪（2）
+// =====================================================================
+
+model EmailEvent {
+  id                  String         @id @default(cuid())
+  resendId            String?
+  campaignRecipientId String?
+  campaignId          String
+  type                EmailEventType
+  bounceType          BounceType?
+  payload             Json
+  processedAt         DateTime       @default(now())
+  idempotencyKey      String         @unique
+
+  createdAt DateTime @default(now())
+
+  campaignRecipient CampaignRecipient? @relation(fields: [campaignRecipientId], references: [id], onDelete: SetNull)
+  campaign          Campaign           @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, type])
+  @@index([campaignId, bounceType])
+  @@index([resendId])
+  @@map("email_events")
+}
+
+model LinkClick {
+  id                  String   @id @default(cuid())
+  campaignRecipientId String
+  campaignId          String
+  userId              String
+  url                 String
+  clickedAt           DateTime @default(now())
+  userAgent           String?
+  ipAddress           String?
+
+  createdAt DateTime @default(now())
+
+  campaignRecipient CampaignRecipient @relation(fields: [campaignRecipientId], references: [id], onDelete: Cascade)
+  campaign          Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId, url])
+  @@index([userId, clickedAt])
+  @@index([campaignRecipientId, clickedAt])
+  @@map("link_clicks")
+}
+
+// =====================================================================
+// 5. 合规与运营（4）
+// =====================================================================
+
+model SuppressionEntry {
+  id        String          @id @default(cuid())
+  type      SuppressionType
+  value     String
+  reason    String?
+  source    String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@unique([type, value])
+  @@index([type])
+  @@map("suppression_entries")
+}
+
+model FrequencyCap {
+  id         String   @id @default(cuid())
+  maxEmails  Int
+  periodDays Int
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("frequency_caps")
+}
+
+model DomainStat {
+  id               String    @id @default(cuid())
+  domain           String    @unique
+  totalSent        Int       @default(0)
+  totalDelivered   Int       @default(0)
+  totalBounced     Int       @default(0)
+  totalComplained  Int       @default(0)
+  bounceRate       Float     @default(0)
+  complaintRate    Float     @default(0)
+  lastCalculatedAt DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@map("domain_stats")
+}
+
+model DeliverabilityAlert {
+  id          String                  @id @default(cuid())
+  type        DeliverabilityAlertType
+  domain      String?
+  campaignId  String?
+  threshold   Float
+  actualValue Float
+  action      String?
+  resolved    Boolean                 @default(false)
+  resolvedAt  DateTime?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@index([resolved, createdAt])
+  @@index([type])
+  @@map("deliverability_alerts")
+}
+
+// =====================================================================
+// 6. 自动化（2）
+// =====================================================================
+
+model Automation {
+  id            String                @id @default(cuid())
+  name          String
+  triggerType   AutomationTriggerType
+  triggerConfig Json
+  templateId    String?
+  template      EmailTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  subject       String
+  delayMinutes  Int                   @default(0)
+  conditions    Json?
+  status        AutomationStatus      @default(DISABLED)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  runs AutomationRun[]
+
+  @@index([status, triggerType])
+  @@map("automations")
+}
+
+model AutomationRun {
+  id            String              @id @default(cuid())
+  automationId  String
+  userId        String
+  status        AutomationRunStatus @default(SCHEDULED)
+  scheduledAt   DateTime
+  sentAt        DateTime?
+  resendEmailId String?
+  failureReason String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([automationId, userId, status])
+  @@index([status, scheduledAt])
+  @@map("automation_runs")
+}
+
+// =====================================================================
+// 7. 审计（1）
+// 不可变性由 init migration 末尾的 BEFORE UPDATE/DELETE trigger 保证
+// =====================================================================
+
+model AuditLog {
+  id         String         @id @default(cuid())
+  action     String
+  entityType String
+  entityId   String
+  actorType  AuditActorType
+  details    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime       @default(now())
+
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@index([actorType, createdAt])
+  @@map("audit_logs")
+}
