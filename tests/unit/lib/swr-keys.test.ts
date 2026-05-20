@@ -27,4 +27,20 @@ describe("swr-keys", () => {
     expect(swrKeys.template("t1")).toBe("/api/templates/t1");
     expect(swrKeys.tagUsers("g1")).toBe("/api/tags/g1/users");
   });
+
+  it("apiClients 拼接 q + status + page", () => {
+    expect(swrKeys.apiClients()).toBe("/api/api-clients");
+    expect(
+      swrKeys.apiClients({ q: "demo", status: "ACTIVE", page: 2, pageSize: 20 }),
+    ).toBe("/api/api-clients?q=demo&status=ACTIVE&page=2&pageSize=20");
+    expect(swrKeys.apiClient("ac_1")).toBe("/api/api-clients/ac_1");
+  });
+
+  it("import source keys 覆盖列表、详情与 jobs 分页", () => {
+    expect(swrKeys.importSources()).toBe("/api/import-sources");
+    expect(swrKeys.importSource("src_1")).toBe("/api/import-sources/src_1");
+    expect(swrKeys.importJobs("src_1", { page: 2, pageSize: 20 })).toBe(
+      "/api/import-sources/src_1/jobs?page=2&pageSize=20",
+    );
+  });
 });

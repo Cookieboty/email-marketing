@@ -121,4 +121,31 @@ export const swrKeys = {
     const qs = sp.toString();
     return qs ? `/api/automations?${qs}` : "/api/automations";
   },
+  apiClients: (params?: Record<string, string | number | undefined>) => {
+    if (!params) return "/api/api-clients";
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === "") continue;
+      sp.set(k, String(v));
+    }
+    const qs = sp.toString();
+    return qs ? `/api/api-clients?${qs}` : "/api/api-clients";
+  },
+  apiClient: (id: string) => `/api/api-clients/${id}`,
+  importSources: () => "/api/import-sources",
+  importSource: (id: string) => `/api/import-sources/${id}`,
+  importJobs: (
+    sourceId: string,
+    params?: Record<string, string | number | undefined>,
+  ) => {
+    const base = `/api/import-sources/${sourceId}/jobs`;
+    if (!params) return base;
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === "") continue;
+      sp.set(k, String(v));
+    }
+    const qs = sp.toString();
+    return qs ? `${base}?${qs}` : base;
+  },
 };

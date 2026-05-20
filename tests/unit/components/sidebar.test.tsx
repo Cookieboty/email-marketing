@@ -27,4 +27,16 @@ describe("Sidebar", () => {
     const inactive = screen.getByText("控制台").closest("a")!;
     expect(inactive.className).not.toContain("bg-primary");
   });
+
+  it("包含 API Clients 入口并指向 /api-clients", () => {
+    render(<Sidebar />);
+    const link = screen.getByText("API Clients").closest("a")!;
+    expect(link.getAttribute("href")).toBe("/api-clients");
+  });
+
+  it("包含数据导入入口并指向 /import-sources", () => {
+    render(<Sidebar />);
+    const link = screen.getByText("数据导入").closest("a")!;
+    expect(link.getAttribute("href")).toBe("/import-sources");
+  });
 });
