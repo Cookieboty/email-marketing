@@ -17,6 +17,24 @@ describe("campaign schema", () => {
       expect(result.success).toBe(true);
     });
 
+    it("accepts empty subject overrides for service cleanup", () => {
+      const result = CreateCampaignSchema.safeParse({
+        name: "My Campaign",
+        templateId: "tpl_1",
+        subjects: { zh: "  " },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects legacy top-level subject", () => {
+      const result = CreateCampaignSchema.safeParse({
+        name: "My Campaign",
+        templateId: "tpl_1",
+        subject: "legacy",
+      });
+      expect(result.success).toBe(false);
+    });
+
     it("requires A/B config when isAbTest=true", () => {
       const result = CreateCampaignSchema.safeParse({
         name: "AB Test",
@@ -33,7 +51,12 @@ describe("campaign schema", () => {
         isAbTest: true,
         abTestConfig: { winnerMetric: "open", testDurationHours: 24 },
         variants: [
-          { variantName: "A", subject: "Sub A", htmlContent: "<p>A</p>", samplePercentage: 10 },
+          {
+            variantName: "A",
+            subjects: { zh: "Sub A" },
+            htmlContents: { zh: "<p>A</p>" },
+            samplePercentage: 10,
+          },
         ],
       });
       expect(result.success).toBe(false);
@@ -46,8 +69,18 @@ describe("campaign schema", () => {
         isAbTest: true,
         abTestConfig: { winnerMetric: "open", testDurationHours: 24 },
         variants: [
-          { variantName: "A", subject: "Sub A", htmlContent: "<p>A</p>", samplePercentage: 10 },
-          { variantName: "B", subject: "Sub B", htmlContent: "<p>B</p>", samplePercentage: 10 },
+          {
+            variantName: "A",
+            subjects: { zh: "Sub A" },
+            htmlContents: { zh: "<p>A</p>" },
+            samplePercentage: 10,
+          },
+          {
+            variantName: "B",
+            subjects: { zh: "Sub B" },
+            htmlContents: { zh: "<p>B</p>" },
+            samplePercentage: 10,
+          },
         ],
       });
       expect(result.success).toBe(true);
@@ -60,8 +93,18 @@ describe("campaign schema", () => {
         isAbTest: true,
         abTestConfig: { winnerMetric: "click", testDurationHours: 12 },
         variants: [
-          { variantName: "A", subject: "S", htmlContent: "<p>A</p>", samplePercentage: 30 },
-          { variantName: "B", subject: "S", htmlContent: "<p>B</p>", samplePercentage: 30 },
+          {
+            variantName: "A",
+            subjects: { zh: "S" },
+            htmlContents: { zh: "<p>A</p>" },
+            samplePercentage: 30,
+          },
+          {
+            variantName: "B",
+            subjects: { zh: "S" },
+            htmlContents: { zh: "<p>B</p>" },
+            samplePercentage: 30,
+          },
         ],
       });
       expect(result.success).toBe(false);
@@ -74,8 +117,18 @@ describe("campaign schema", () => {
         isAbTest: true,
         abTestConfig: { winnerMetric: "click", testDurationHours: 12 },
         variants: [
-          { variantName: "A", subject: "S", htmlContent: "<p>A</p>", samplePercentage: 10 },
-          { variantName: "A", subject: "S", htmlContent: "<p>B</p>", samplePercentage: 10 },
+          {
+            variantName: "A",
+            subjects: { zh: "S" },
+            htmlContents: { zh: "<p>A</p>" },
+            samplePercentage: 10,
+          },
+          {
+            variantName: "A",
+            subjects: { zh: "S" },
+            htmlContents: { zh: "<p>B</p>" },
+            samplePercentage: 10,
+          },
         ],
       });
       expect(result.success).toBe(false);
@@ -106,6 +159,55 @@ describe("campaign schema", () => {
         tagFilterMode: "AND",
       });
       expect(result.tagFilterMode).toBe("ALL");
+    });
+
+    it("rejects variant where htmlContents and subjects keys are misaligned", () => {
+      const result = CreateCampaignSchema.safeParse({
+        name: "AB Test",
+        templateId: "tpl_1",
+        isAbTest: true,
+        abTestConfig: { winnerMetric: "open", testDurationHours: 24 },
+        variants: [
+          {
+            variantName: "A",
+            subjects: { zh: "Sub A" },
+            htmlContents: { zh: "<p>A</p>", en: "<p>A en</p>" },
+            samplePercentage: 10,
+          },
+          {
+            variantName: "B",
+            subjects: { zh: "Sub B" },
+            htmlContents: { zh: "<p>B</p>" },
+            samplePercentage: 10,
+          },
+        ],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects variant where textContents declares a locale not present in htmlContents", () => {
+      const result = CreateCampaignSchema.safeParse({
+        name: "AB Test",
+        templateId: "tpl_1",
+        isAbTest: true,
+        abTestConfig: { winnerMetric: "open", testDurationHours: 24 },
+        variants: [
+          {
+            variantName: "A",
+            subjects: { zh: "Sub A" },
+            htmlContents: { zh: "<p>A</p>" },
+            textContents: { en: "extra" },
+            samplePercentage: 10,
+          },
+          {
+            variantName: "B",
+            subjects: { zh: "Sub B" },
+            htmlContents: { zh: "<p>B</p>" },
+            samplePercentage: 10,
+          },
+        ],
+      });
+      expect(result.success).toBe(false);
     });
   });
 

@@ -39,6 +39,12 @@ export interface ImportRow {
   birthDate?: string | Date;
   tags?: string[];
   /**
+   * 用户语言偏好（多语言模板的 AUTO 策略将使用该字段决策）。
+   * 合法值为 "zh" | "en"；其他值会按行返回错误，但不会中断整体导入。
+   * 显式传入 null 表示清空已有偏好。
+   */
+  locale?: "zh" | "en" | null;
+  /**
    * 订阅分类首选项（spec/preference-center.md §348-365）。
    * key 为分类 slug，value 为 true=订阅 / false=退订。
    * 未列出的分类不会被改动；isTransactional 分类会被静默忽略并写入 errors。
@@ -81,6 +87,7 @@ function sanitizeRow(row: ImportRow): ImportRow {
   if (row.orderCount !== undefined) out.orderCount = row.orderCount;
   if (row.lastOrderAt !== undefined) out.lastOrderAt = row.lastOrderAt;
   if (row.birthDate !== undefined) out.birthDate = row.birthDate;
+  if (row.locale !== undefined) out.locale = row.locale;
   if (row.tags && row.tags.length > 0) {
     out.tags = row.tags
       .map((t) => sanitizeCsvField(t))
@@ -117,6 +124,19 @@ export function parseSubscriptionsCell(s: string | undefined): Record<string, bo
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** 解析 CSV/JSON 中的 locale 字段。返回 undefined=未传，null=显式清空，"zh"/"en"=合法，"invalid"=非法。 */
+export function parseLocaleCell(
+  raw: string | undefined | null,
+): "zh" | "en" | null | undefined | "invalid" {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed === "") return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower === "zh" || lower === "en") return lower;
+  return "invalid";
+}
+
 /** CSV 字符串 → ImportRow[]，保留行号（含 header 偏移）。 */
 export function parseCsv(csv: string): { rows: ImportRow[]; errors: ImportError[] } {
   const errors: ImportError[] = [];
@@ -134,6 +154,14 @@ export function parseCsv(csv: string): { rows: ImportRow[]; errors: ImportError[
   for (let i = 0; i < parsed.data.length; i += 1) {
     const r = parsed.data[i]!;
     const tagsField = (r.tags ?? "").trim();
+    const localeParsed = parseLocaleCell(r.locale);
+    if (localeParsed === "invalid") {
+      errors.push({
+        row: i + 2,
+        email: (r.email ?? "").trim() || undefined,
+        reason: `Invalid locale: ${r.locale}（仅支持 zh / en）`,
+      });
+    }
     rows.push({
       externalId: r.externalId?.trim() || undefined,
       email: (r.email ?? "").trim(),
@@ -144,6 +172,7 @@ export function parseCsv(csv: string): { rows: ImportRow[]; errors: ImportError[
       orderCount: r.orderCount ? Number(r.orderCount) : undefined,
       lastOrderAt: r.lastOrderAt?.trim() || undefined,
       birthDate: r.birthDate?.trim() || undefined,
+      locale: localeParsed === "invalid" ? undefined : localeParsed,
       tags: tagsField
         ? tagsField
           .split(",")
@@ -330,6 +359,7 @@ async function upsertOne(
       orderCount: typeof row.orderCount === "number" ? row.orderCount : 0,
       lastOrderAt: row.lastOrderAt ? new Date(row.lastOrderAt) : null,
       birthDate: row.birthDate ? new Date(row.birthDate) : null,
+      locale: row.locale ?? null,
     };
     if (row.totalSpend !== undefined && row.totalSpend !== "") {
       createData.totalSpend = new Prisma.Decimal(String(row.totalSpend));
@@ -347,6 +377,7 @@ async function upsertOne(
       updateData.lastOrderAt = row.lastOrderAt ? new Date(row.lastOrderAt) : null;
     if (row.birthDate !== undefined)
       updateData.birthDate = row.birthDate ? new Date(row.birthDate) : null;
+    if (row.locale !== undefined) updateData.locale = row.locale;
     if (row.totalSpend !== undefined && row.totalSpend !== "") {
       updateData.totalSpend = new Prisma.Decimal(String(row.totalSpend));
     }

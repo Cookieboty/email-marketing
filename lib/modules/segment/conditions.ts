@@ -25,6 +25,9 @@ const NUMBER_FIELDS = [
   "totalBounceCount",
   "totalOpens",
   "totalClicks",
+  "balance",
+  "usedQuota",
+  "requestCount",
 ] as const;
 
 /** 日期字段：支持等值/范围比较/between/within_days */
@@ -86,6 +89,9 @@ export const SEGMENT_FIELD_OPERATORS: Record<SegmentField, readonly SegmentOpera
   totalBounceCount: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
   totalOpens: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
   totalClicks: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
+  balance: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
+  usedQuota: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
+  requestCount: ["eq", "neq", "gt", "gte", "lt", "lte", "between"],
 
   lastOrderAt: ["eq", "gt", "gte", "lt", "lte", "between", "within_days"],
   createdAt: ["eq", "gt", "gte", "lt", "lte", "between", "within_days"],

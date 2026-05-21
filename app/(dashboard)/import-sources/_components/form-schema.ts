@@ -7,9 +7,12 @@ import { z } from "zod";
 const HttpsUrl = z
   .string()
   .url()
-  .refine((u) => /^https:\/\//i.test(u), {
-    message: "baseUrl 必须使用 https://",
-  });
+  .refine(
+    (u) =>
+      /^https:\/\//i.test(u) ||
+      /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(u),
+    { message: "baseUrl 必须 https，或 http://localhost" },
+  );
 
 const FieldMappingSchema = z
   .record(z.string().min(1), z.string().min(1))

@@ -4,6 +4,7 @@ import { verifyOrigin } from "@/lib/auth/origin";
 import { ForbiddenError } from "@/lib/errors";
 import { PreviewTemplateSchema } from "@/lib/modules/template/schema";
 import { templateService } from "@/lib/modules/template/service";
+import { withLocalizedBuiltinText } from "@/lib/modules/template/render";
 import { extractVariables, render } from "@/lib/template-engine";
 
 export const runtime = "nodejs";
@@ -21,11 +22,21 @@ export const POST = withAuth(async (_session, request: Request, ctx: Ctx) => {
   const { id } = await ctx.params;
   const tpl = await templateService.getById(id);
   const input = await parseJsonBody(request, PreviewTemplateSchema);
+  const baseLocale =
+    tpl.locales.find((locale) => locale.locale === input.locale) ??
+    tpl.locales.find((locale) => locale.locale === tpl.defaultLocale);
+  if (!baseLocale) {
+    return NextResponse.json({ error: "MissingLocaleContent" }, { status: 400 });
+  }
 
-  const subject = input.subject ?? tpl.subject;
-  const html = input.htmlContent ?? tpl.htmlContent;
-  const text = input.textContent ?? tpl.textContent ?? "";
-  const opts = { missing: input.missingStrategy } as const;
+  const subject = input.subject ?? baseLocale.subject;
+  const html = input.htmlContent ?? baseLocale.htmlContent;
+  const text = input.textContent ?? baseLocale.textContent ?? "";
+  const builtin = withLocalizedBuiltinText(input.locale, {
+    unsubscribeUrl: input.unsubscribeUrl,
+    unsubscribeTopicUrl: input.unsubscribeTopicUrl,
+  });
+  const opts = { missing: input.missingStrategy, builtin };
   const renderedSubject = render(subject, input.variables ?? {}, opts);
   const renderedHtml = render(html, input.variables ?? {}, opts);
   const renderedText = text ? render(text, input.variables ?? {}, opts) : null;

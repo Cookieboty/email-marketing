@@ -1,11 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import type { ColumnDef } from "@tanstack/react-table";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,11 +25,27 @@ import {
   apiPatch,
   apiPost,
   swrFetcher,
-  type ApiClientError,
 } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
+import {
+  LOCALE_LABELS,
+  type Locale,
+} from "@/app/(dashboard)/templates/_components/types";
+import {
+  buildCreateAutomationPayload,
+  buildUpdateAutomationPayload,
+  forcedLocaleOptions,
+  recordToFormValues,
+  subjectInputLocales,
+  summarizeSubjects,
+  type AutomationFormValues,
+  type AutomationRecord,
+  type AutomationTriggerType,
+  type LocaleStrategy,
+  type TemplateOption,
+} from "./automation-multilingual-helpers";
 
-const TRIGGER_TYPE_LABELS: Record<string, string> = {
+const TRIGGER_TYPE_LABELS: Record<AutomationTriggerType, string> = {
   USER_CREATED: "用户创建",
   TAG_CHANGED: "标签变更",
   BIRTHDAY: "生日",
@@ -45,37 +58,20 @@ const STATUS_LABELS: Record<string, string> = {
   DISABLED: "停用",
 };
 
-interface AutomationRow {
-  id: string;
-  name: string;
-  triggerType: string;
-  subject: string;
-  delayMinutes: number;
-  status: string;
-  templateId: string | null;
-  triggerConfig: Record<string, unknown>;
-  conditions: Record<string, unknown> | null;
-  createdAt: string;
-  updatedAt: string;
-}
+const TRIGGER_TYPES: AutomationTriggerType[] = [
+  "USER_CREATED",
+  "TAG_CHANGED",
+  "BIRTHDAY",
+  "REENGAGEMENT",
+  "CUSTOM_EVENT",
+];
 
 interface ListResp {
-  data: AutomationRow[];
+  data: AutomationRecord[];
   total: number;
   page: number;
   pageSize: number;
 }
-
-const TRIGGER_TYPES = ["USER_CREATED", "TAG_CHANGED", "BIRTHDAY", "REENGAGEMENT", "CUSTOM_EVENT"] as const;
-
-const FormSchema = z.object({
-  name: z.string().trim().min(1, "请输入名称").max(120),
-  triggerType: z.enum(TRIGGER_TYPES, { required_error: "请选择触发类型" }),
-  subject: z.string().trim().min(1, "请输入邮件主题").max(255),
-  delayMinutes: z.coerce.number().int().min(0).max(525600).default(0),
-  templateId: z.string().optional(),
-});
-type FormValues = z.infer<typeof FormSchema>;
 
 function asMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {
@@ -83,6 +79,18 @@ function asMessage(e: unknown): string {
     if (typeof m === "string") return m;
   }
   return "操作失败";
+}
+
+function emptyValues(): AutomationFormValues {
+  return {
+    name: "",
+    triggerType: "USER_CREATED",
+    templateId: "",
+    subjects: {},
+    localeStrategy: "AUTO",
+    forcedLocale: "",
+    delayMinutes: 0,
+  };
 }
 
 export default function AutomationsPage() {
@@ -102,95 +110,144 @@ export default function AutomationsPage() {
     keepPreviousData: true,
   });
 
-  const [editing, setEditing] = useState<AutomationRow | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [deleting, setDeleting] = useState<AutomationRow | null>(null);
+  const { data: templates } = useSWR<{ data: TemplateOption[] }>(
+    "/api/templates?pageSize=100",
+    swrFetcher,
+  );
 
-  async function toggleStatus(row: AutomationRow) {
+  const [editing, setEditing] = useState<AutomationRecord | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [deleting, setDeleting] = useState<AutomationRecord | null>(null);
+
+  async function toggleStatus(row: AutomationRecord) {
     const next = row.status === "ENABLED" ? "DISABLED" : "ENABLED";
     try {
       await apiPatch(`/api/automations/${row.id}`, { status: next });
       toast({ title: next === "ENABLED" ? "已启用" : "已停用" });
       await mutate();
     } catch (e) {
-      toast({ title: "操作失败", description: asMessage(e), variant: "destructive" });
+      toast({
+        title: "操作失败",
+        description: asMessage(e),
+        variant: "destructive",
+      });
     }
   }
 
-  const columns: ColumnDef<AutomationRow>[] = [
-      {
-        accessorKey: "name",
-        header: "名称",
-        cell: ({ row }) => <span className="font-medium">{row.original.name}</span>,
-      },
-      {
-        accessorKey: "triggerType",
-        header: "触发类型",
-        cell: ({ row }) => (
-          <Badge variant="outline">
-            {TRIGGER_TYPE_LABELS[row.original.triggerType] ?? row.original.triggerType}
-          </Badge>
-        ),
-      },
-      {
-        accessorKey: "subject",
-        header: "邮件主题",
-        cell: ({ row }) => (
-          <span className="max-w-[200px] truncate text-sm">{row.original.subject}</span>
-        ),
-      },
-      {
-        accessorKey: "delayMinutes",
-        header: "延迟",
-        cell: ({ row }) => {
-          const m = row.original.delayMinutes;
-          if (m === 0) return <span className="text-muted-foreground">立即</span>;
-          if (m < 60) return `${m} 分钟`;
-          if (m < 1440) return `${Math.round(m / 60)} 小时`;
-          return `${Math.round(m / 1440)} 天`;
-        },
-      },
-      {
-        accessorKey: "status",
-        header: "状态",
-        cell: ({ row }) => (
-          <Badge variant={row.original.status === "ENABLED" ? "default" : "secondary"}>
-            {STATUS_LABELS[row.original.status] ?? row.original.status}
-          </Badge>
-        ),
-      },
-      {
-        id: "actions",
-        header: "操作",
-        cell: ({ row }) => (
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => toggleStatus(row.original)}
+  const columns: ColumnDef<AutomationRecord>[] = [
+    {
+      accessorKey: "name",
+      header: "名称",
+      cell: ({ row }) => (
+        <span className="font-medium">{row.original.name}</span>
+      ),
+    },
+    {
+      accessorKey: "triggerType",
+      header: "触发类型",
+      cell: ({ row }) => (
+        <Badge variant="outline">
+          {TRIGGER_TYPE_LABELS[row.original.triggerType] ??
+            row.original.triggerType}
+        </Badge>
+      ),
+    },
+    {
+      id: "subjects",
+      header: "邮件主题",
+      cell: ({ row }) => {
+        const summary = summarizeSubjects(row.original.subjects);
+        if (summary) {
+          return (
+            <span
+              className="max-w-[260px] truncate text-sm"
+              data-testid={`automation-subjects-${row.original.id}`}
             >
-              {row.original.status === "ENABLED" ? "停用" : "启用"}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setEditing(row.original)}
-            >
-              编辑
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              onClick={() => setDeleting(row.original)}
-            >
-              删除
-            </Button>
-          </div>
-        ),
+              {summary}
+            </span>
+          );
+        }
+        if (row.original.templateId) {
+          return (
+            <span className="text-xs text-muted-foreground">
+              使用模板内容
+            </span>
+          );
+        }
+        return <span className="text-xs text-muted-foreground">-</span>;
       },
+    },
+    {
+      id: "localeStrategy",
+      header: "语言策略",
+      cell: ({ row }) => {
+        if (row.original.localeStrategy === "FORCE") {
+          return (
+            <Badge variant="secondary">
+              FORCE ·{" "}
+              {row.original.forcedLocale
+                ? LOCALE_LABELS[row.original.forcedLocale]
+                : "-"}
+            </Badge>
+          );
+        }
+        return <Badge variant="outline">AUTO</Badge>;
+      },
+    },
+    {
+      accessorKey: "delayMinutes",
+      header: "延迟",
+      cell: ({ row }) => {
+        const m = row.original.delayMinutes;
+        if (m === 0) return <span className="text-muted-foreground">立即</span>;
+        if (m < 60) return `${m} 分钟`;
+        if (m < 1440) return `${Math.round(m / 60)} 小时`;
+        return `${Math.round(m / 1440)} 天`;
+      },
+    },
+    {
+      accessorKey: "status",
+      header: "状态",
+      cell: ({ row }) => (
+        <Badge
+          variant={row.original.status === "ENABLED" ? "default" : "secondary"}
+        >
+          {STATUS_LABELS[row.original.status] ?? row.original.status}
+        </Badge>
+      ),
+    },
+    {
+      id: "actions",
+      header: "操作",
+      cell: ({ row }) => (
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => toggleStatus(row.original)}
+          >
+            {row.original.status === "ENABLED" ? "停用" : "启用"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setEditing(row.original)}
+          >
+            编辑
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            onClick={() => setDeleting(row.original)}
+          >
+            删除
+          </Button>
+        </div>
+      ),
+    },
   ];
 
   const total = data?.total ?? 0;
@@ -207,8 +264,16 @@ export default function AutomationsPage() {
 
       <div className="grid gap-3 rounded-md border bg-card p-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">状态筛选</label>
-          <Select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
+          <label className="text-xs font-medium text-muted-foreground">
+            状态筛选
+          </label>
+          <Select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              setPage(1);
+            }}
+          >
             <option value="">全部</option>
             <option value="ENABLED">启用</option>
             <option value="DISABLED">停用</option>
@@ -216,7 +281,12 @@ export default function AutomationsPage() {
         </div>
       </div>
 
-      <DataTable columns={columns} data={rows} loading={isLoading} emptyText="暂无自动化规则" />
+      <DataTable
+        columns={columns}
+        data={rows}
+        loading={isLoading}
+        emptyText="暂无自动化规则"
+      />
       <Pagination
         page={page}
         pageSize={pageSize}
@@ -229,63 +299,88 @@ export default function AutomationsPage() {
 
       <AutomationFormDialog
         open={createOpen}
+        mode="create"
+        templates={templates?.data ?? []}
+        initialValues={emptyValues()}
         onClose={() => setCreateOpen(false)}
-        title="新增自动化"
-        description="配置自动化触发条件和邮件"
-        submit={async (v) => {
-          await apiPost("/api/automations", {
-            name: v.name,
-            triggerType: v.triggerType,
-            triggerConfig: {},
-            subject: v.subject,
-            delayMinutes: v.delayMinutes,
-            templateId: v.templateId || undefined,
-          });
-          toast({ title: "已创建" });
-          await mutate();
+        onSubmit={async (values, template) => {
+          const { payload, errors } = buildCreateAutomationPayload(
+            values,
+            template,
+          );
+          if (!payload) {
+            toast({
+              title: "请检查表单",
+              description: errors[0]?.message ?? "存在校验错误",
+              variant: "destructive",
+            });
+            return false;
+          }
+          try {
+            await apiPost("/api/automations", payload);
+            toast({ title: "已创建" });
+            await mutate();
+            return true;
+          } catch (e) {
+            toast({
+              title: "创建失败",
+              description: asMessage(e),
+              variant: "destructive",
+            });
+            return false;
+          }
         }}
       />
 
       <AutomationFormDialog
         open={editing !== null}
+        mode="edit"
+        templates={templates?.data ?? []}
+        initialValues={editing ? recordToFormValues(editing) : emptyValues()}
         onClose={() => setEditing(null)}
-        title="编辑自动化"
-        description="修改自动化配置"
-        defaults={
-          editing
-            ? {
-                name: editing.name,
-                triggerType: editing.triggerType as FormValues["triggerType"],
-                subject: editing.subject,
-                delayMinutes: editing.delayMinutes,
-                templateId: editing.templateId ?? "",
-              }
-            : undefined
-        }
-        submit={async (v) => {
-          if (!editing) return;
-          const payload: Record<string, unknown> = {};
-          if (v.name !== editing.name) payload.name = v.name;
-          if (v.triggerType !== editing.triggerType) payload.triggerType = v.triggerType;
-          if (v.subject !== editing.subject) payload.subject = v.subject;
-          if (v.delayMinutes !== editing.delayMinutes) payload.delayMinutes = v.delayMinutes;
-          if ((v.templateId ?? "") !== (editing.templateId ?? "")) {
-            payload.templateId = v.templateId || null;
-          }
-          if (Object.keys(payload).length === 0) {
+        onSubmit={async (values, template) => {
+          if (!editing) return false;
+          const { payload, errors, hasChanges } = buildUpdateAutomationPayload(
+            values,
+            editing,
+            template,
+          );
+          if (!hasChanges) {
             toast({ title: "未做修改" });
-            return;
+            return true;
           }
-          await apiPatch(`/api/automations/${editing.id}`, payload);
-          toast({ title: "已保存" });
-          await mutate();
+          if (!payload) {
+            toast({
+              title: "请检查表单",
+              description: errors[0]?.message ?? "存在校验错误",
+              variant: "destructive",
+            });
+            return false;
+          }
+          try {
+            await apiPatch(`/api/automations/${editing.id}`, payload);
+            toast({ title: "已保存" });
+            await mutate();
+            return true;
+          } catch (e) {
+            toast({
+              title: "保存失败",
+              description: asMessage(e),
+              variant: "destructive",
+            });
+            return false;
+          }
         }}
       />
 
       <ConfirmDialog
         open={deleting !== null}
         title="删除自动化"
-        description={deleting ? `确认删除「${deleting.name}」？关联的运行记录也会被清除。` : ""}
+        description={
+          deleting
+            ? `确认删除「${deleting.name}」？关联的运行记录也会被清除。`
+            : ""
+        }
         confirmLabel="删除"
         destructive
         onOpenChange={(o) => {
@@ -312,48 +407,79 @@ export default function AutomationsPage() {
   );
 }
 
+interface AutomationFormDialogProps {
+  open: boolean;
+  mode: "create" | "edit";
+  templates: TemplateOption[];
+  initialValues: AutomationFormValues;
+  onClose: () => void;
+  onSubmit: (
+    values: AutomationFormValues,
+    template: TemplateOption | null,
+  ) => Promise<boolean>;
+}
+
 function AutomationFormDialog({
   open,
+  mode,
+  templates,
+  initialValues,
   onClose,
-  title,
-  description,
-  defaults,
-  submit,
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  description?: string;
-  defaults?: FormValues;
-  submit: (v: FormValues) => Promise<void>;
-}) {
-  const { toast } = useToast();
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-    reset,
-    setValue,
-    watch,
-  } = useForm<FormValues>({
-    resolver: zodResolver(FormSchema),
-    values: defaults ?? { name: "", triggerType: "USER_CREATED", subject: "", delayMinutes: 0, templateId: "" },
-  });
+  onSubmit,
+}: AutomationFormDialogProps) {
+  const [values, setValues] = useState<AutomationFormValues>(initialValues);
+  const [submitting, setSubmitting] = useState(false);
 
-  const triggerType = watch("triggerType");
+  useEffect(() => {
+    if (open) setValues(initialValues);
+  }, [open, initialValues]);
 
-  async function onSubmit(v: FormValues) {
+  const selectedTemplate = useMemo<TemplateOption | null>(() => {
+    if (!values.templateId) return null;
+    return templates.find((t) => t.id === values.templateId) ?? null;
+  }, [templates, values.templateId]);
+
+  const allowedLocales = useMemo(
+    () => forcedLocaleOptions(selectedTemplate),
+    [selectedTemplate],
+  );
+
+  const subjectLocales = useMemo(
+    () => subjectInputLocales(values, selectedTemplate),
+    [values, selectedTemplate],
+  );
+
+  useEffect(() => {
+    if (
+      values.localeStrategy === "FORCE" &&
+      values.forcedLocale &&
+      !allowedLocales.includes(values.forcedLocale as Locale)
+    ) {
+      setValues((prev) => ({
+        ...prev,
+        forcedLocale: allowedLocales[0] ?? "",
+      }));
+    }
+  }, [allowedLocales, values.localeStrategy, values.forcedLocale]);
+
+  function upd(patch: Partial<AutomationFormValues>) {
+    setValues((prev) => ({ ...prev, ...patch }));
+  }
+
+  function updateSubject(locale: Locale, value: string) {
+    setValues((prev) => ({
+      ...prev,
+      subjects: { ...prev.subjects, [locale]: value },
+    }));
+  }
+
+  async function handleSave() {
+    setSubmitting(true);
     try {
-      await submit(v);
-      reset();
-      onClose();
-    } catch (e) {
-      const err = e as ApiClientError;
-      toast({
-        title: "保存失败",
-        description: asMessage(err),
-        variant: "destructive",
-      });
+      const ok = await onSubmit(values, selectedTemplate);
+      if (ok) onClose();
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -361,69 +487,202 @@ function AutomationFormDialog({
     <Dialog
       open={open}
       onOpenChange={(o) => {
-        if (!o) {
-          reset();
-          onClose();
-        }
+        if (!o) onClose();
       }}
     >
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          {description ? <DialogDescription>{description}</DialogDescription> : null}
+          <DialogTitle>
+            {mode === "create" ? "新增自动化" : "编辑自动化"}
+          </DialogTitle>
+          <DialogDescription>
+            配置触发条件、模板与多语言邮件主题。
+          </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSave();
+          }}
+        >
           <div className="space-y-1.5">
             <Label htmlFor="auto-name">名称</Label>
-            <Input id="auto-name" autoFocus {...register("name")} />
-            {errors.name && <p className="text-xs text-destructive">{errors.name.message}</p>}
+            <Input
+              id="auto-name"
+              autoFocus
+              value={values.name}
+              onChange={(e) => upd({ name: e.target.value })}
+              data-testid="automation-input-name"
+            />
           </div>
 
           <div className="space-y-1.5">
             <Label>触发类型</Label>
             <Select
-              value={triggerType}
-              onChange={(e) => setValue("triggerType", e.target.value as FormValues["triggerType"])}
+              value={values.triggerType}
+              onChange={(e) =>
+                upd({
+                  triggerType: e.target.value as AutomationTriggerType,
+                })
+              }
+              data-testid="automation-select-trigger"
             >
               {TRIGGER_TYPES.map((t) => (
                 <option key={t} value={t}>
-                  {TRIGGER_TYPE_LABELS[t] ?? t}
+                  {TRIGGER_TYPE_LABELS[t]}
                 </option>
               ))}
             </Select>
-            {errors.triggerType && <p className="text-xs text-destructive">{errors.triggerType.message}</p>}
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="auto-subject">邮件主题</Label>
-            <Input id="auto-subject" {...register("subject")} />
-            {errors.subject && <p className="text-xs text-destructive">{errors.subject.message}</p>}
+            <Label>模板</Label>
+            <Select
+              value={values.templateId}
+              onChange={(e) => upd({ templateId: e.target.value })}
+              data-testid="automation-select-template"
+            >
+              <option value="">不关联模板（直接使用主题）</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}（
+                  {t.availableLocales
+                    .map((loc) => LOCALE_LABELS[loc])
+                    .join(" / ")}
+                  ）
+                </option>
+              ))}
+            </Select>
+            {selectedTemplate ? (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="automation-template-summary"
+              >
+                默认语言：{LOCALE_LABELS[selectedTemplate.defaultLocale]} ·
+                可用语言：
+                {selectedTemplate.availableLocales
+                  .map((loc) => LOCALE_LABELS[loc])
+                  .join(" / ")}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="space-y-2">
+            <Label>语言策略</Label>
+            <div className="flex flex-wrap gap-3 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="auto-locale-strategy"
+                  value="AUTO"
+                  checked={values.localeStrategy === "AUTO"}
+                  onChange={() =>
+                    upd({ localeStrategy: "AUTO", forcedLocale: "" })
+                  }
+                  data-testid="automation-radio-auto"
+                />
+                按收件人语言自动选择 (AUTO)
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="auto-locale-strategy"
+                  value="FORCE"
+                  checked={values.localeStrategy === "FORCE"}
+                  onChange={() =>
+                    upd({
+                      localeStrategy: "FORCE" as LocaleStrategy,
+                      forcedLocale:
+                        (values.forcedLocale as Locale | "") ||
+                        allowedLocales[0] ||
+                        "",
+                    })
+                  }
+                  data-testid="automation-radio-force"
+                />
+                强制使用指定语言 (FORCE)
+              </label>
+            </div>
+            {values.localeStrategy === "FORCE" && (
+              <div className="space-y-1.5">
+                <Label>强制语言</Label>
+                <Select
+                  value={values.forcedLocale}
+                  onChange={(e) =>
+                    upd({ forcedLocale: e.target.value as Locale | "" })
+                  }
+                  data-testid="automation-select-forced-locale"
+                >
+                  <option value="">选择语言</option>
+                  {allowedLocales.map((loc) => (
+                    <option key={loc} value={loc}>
+                      {LOCALE_LABELS[loc]}
+                    </option>
+                  ))}
+                </Select>
+                {selectedTemplate && allowedLocales.length === 0 && (
+                  <p className="text-xs text-destructive">
+                    所选模板未配置任何语言，无法启用强制策略。
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label>邮件主题</Label>
+            <p className="text-xs text-muted-foreground">
+              {values.templateId
+                ? "留空则使用模板对应语言的主题。"
+                : "未选择模板时，至少填写一个语言的主题。"}
+            </p>
+            <div className="space-y-2">
+              {subjectLocales.map((loc) => (
+                <div
+                  key={loc}
+                  className="space-y-1"
+                  data-testid={`automation-subject-${loc}`}
+                >
+                  <Label className="text-xs text-muted-foreground">
+                    {LOCALE_LABELS[loc]} 主题
+                  </Label>
+                  <Input
+                    value={values.subjects[loc] ?? ""}
+                    onChange={(e) => updateSubject(loc, e.target.value)}
+                    placeholder={`${LOCALE_LABELS[loc]} subject`}
+                    data-testid={`automation-input-subject-${loc}`}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="space-y-1.5">
             <Label htmlFor="auto-delay">延迟（分钟）</Label>
-            <Input id="auto-delay" type="number" min={0} {...register("delayMinutes")} />
-            {errors.delayMinutes && <p className="text-xs text-destructive">{errors.delayMinutes.message}</p>}
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="auto-template">模板 ID（可选）</Label>
-            <Input id="auto-template" placeholder="留空则不关联模板" {...register("templateId")} />
+            <Input
+              id="auto-delay"
+              type="number"
+              min={0}
+              value={values.delayMinutes}
+              onChange={(e) =>
+                upd({ delayMinutes: Number(e.target.value) || 0 })
+              }
+              data-testid="automation-input-delay"
+            />
           </div>
 
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                reset();
-                onClose();
-              }}
-            >
+            <Button type="button" variant="outline" onClick={onClose}>
               取消
             </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "保存中..." : "保存"}
+            <Button
+              type="submit"
+              disabled={submitting}
+              data-testid="automation-submit"
+            >
+              {submitting ? "保存中..." : "保存"}
             </Button>
           </DialogFooter>
         </form>

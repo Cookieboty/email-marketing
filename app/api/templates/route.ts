@@ -15,6 +15,7 @@ export const GET = withAuth(async (_session, request: Request) => {
   const parsed = ListTemplatesQuerySchema.parse({
     q: url.searchParams.get("q") ?? undefined,
     includeArchived: url.searchParams.get("includeArchived") ?? undefined,
+    localeFilter: url.searchParams.get("localeFilter") ?? undefined,
     page: url.searchParams.get("page") ?? undefined,
     pageSize: url.searchParams.get("pageSize") ?? undefined,
   });

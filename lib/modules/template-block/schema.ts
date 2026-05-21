@@ -11,6 +11,7 @@
 import { z } from "zod";
 
 export const BLOCK_HTML_MAX_BYTES = 256 * 1024;
+const LocaleSchema = z.enum(["zh", "en"]);
 
 const requiredHtml = z
   .string()
@@ -37,6 +38,7 @@ const categorySchema = z
 export const CreateTemplateBlockSchema = z.object({
   name: z.string().trim().min(1).max(128),
   category: categorySchema,
+  locale: LocaleSchema.default("zh"),
   htmlContent: requiredHtml,
 });
 export type CreateTemplateBlockInput = z.infer<typeof CreateTemplateBlockSchema>;
@@ -45,11 +47,16 @@ export const UpdateTemplateBlockSchema = z
   .object({
     name: z.string().trim().min(1).max(128).optional(),
     category: categorySchema,
+    locale: LocaleSchema.optional(),
     htmlContent: optionalHtml,
   })
   .strict()
   .refine(
-    (v) => v.name !== undefined || v.category !== undefined || v.htmlContent !== undefined,
+    (v) =>
+      v.name !== undefined ||
+      v.category !== undefined ||
+      v.locale !== undefined ||
+      v.htmlContent !== undefined,
     { message: "must provide at least one field" },
   );
 export type UpdateTemplateBlockInput = z.infer<typeof UpdateTemplateBlockSchema>;
@@ -57,6 +64,7 @@ export type UpdateTemplateBlockInput = z.infer<typeof UpdateTemplateBlockSchema>
 export const ListTemplateBlocksQuerySchema = z.object({
   q: z.string().trim().max(128).optional(),
   category: z.string().trim().max(64).optional(),
+  locale: LocaleSchema.optional(),
   page: z.coerce.number().int().positive().default(1),
   pageSize: z.coerce.number().int().positive().max(200).default(50),
 });

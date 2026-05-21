@@ -1,90 +1,56 @@
-"use client";
+/**
+ * 公开退订落地页（备用入口）。
+ *
+ * 邮件正文中的 unsubscribe_link 已经直接指向 /api/unsubscribe 的 GET HTML 落
+ * 地页（更轻量），本页面主要用于：
+ *  - 偏好中心 / 用户手动复制链接的浏览器访问
+ *  - 测试发送场景下的开发者预览
+ *
+ * spec/email-template-multilingual §605：按 User.locale 渲染 zh/en 静态文案。
+ * 本页是 Server Component，按 token 查一次 user.locale 后把字符串下发到内
+ * 联的 client form 组件用于交互。
+ */
 
-import { useSearchParams } from "next/navigation";
-import { Suspense } from "react";
+import { prisma } from "@/lib/prisma";
+import { getUnsubscribeDict } from "@/lib/modules/subscription-category/unsubscribe-i18n";
+import { UnsubscribeForm } from "./_components/unsubscribe-form";
 
-function maskEmail(email: string): string {
+function maskEmail(email: string, fallback: string): string {
   const [local, domain] = email.split("@");
-  if (!local || !domain) return "***@***";
-  const visible = local.length <= 2 ? local[0] + "*" : local[0] + "***" + local[local.length - 1];
+  if (!local || !domain) return fallback;
+  const visible =
+    local.length <= 2
+      ? `${local[0]}*`
+      : `${local[0]}***${local[local.length - 1]}`;
   return `${visible}@${domain}`;
 }
 
-function UnsubscribeContent() {
-  const params = useSearchParams();
-  const token = params.get("token") ?? "";
-  const email = params.get("email") ?? "";
-  const category = params.get("category") ?? undefined;
-  const masked = email ? maskEmail(email) : "您的邮箱";
-
-  if (!token) {
-    return (
-      <div className="card">
-        <h1>退订链接无效</h1>
-        <p>缺少必要的 token 参数。请检查邮件中的链接是否完整。</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="card">
-      <h1>确认退订</h1>
-      <p>
-        {category
-          ? `您确定要退订「${category}」分类的邮件吗？退订后，${masked} 将不再收到该分类的邮件。`
-          : `您确定要退订所有邮件吗？退订后，${masked} 将不再收到我们的任何邮件通知。`}
-      </p>
-      <form
-        onSubmit={async (e) => {
-          e.preventDefault();
-          const btn = e.currentTarget.querySelector("button") as HTMLButtonElement;
-          btn.disabled = true;
-          btn.textContent = "处理中...";
-          try {
-            const res = await fetch("/api/unsubscribe", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ token, ...(category ? { category } : {}) }),
-            });
-            const data = await res.json();
-            if (data.ok) {
-              btn.textContent = "已退订";
-              const p = document.createElement("p");
-              p.textContent = category
-                ? `已成功退订「${category}」分类。`
-                : "已成功退订所有邮件。";
-              btn.parentElement?.appendChild(p);
-            } else {
-              btn.textContent = "退订失败";
-              btn.disabled = false;
-            }
-          } catch {
-            btn.textContent = "网络错误，请重试";
-            btn.disabled = false;
-          }
-        }}
-      >
-        <button
-          type="submit"
-          style={{
-            marginTop: 16,
-            padding: "10px 24px",
-            background: "#dc2626",
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-            fontSize: 15,
-          }}
-        >
-          确认退订
-        </button>
-      </form>
-    </div>
-  );
+interface SearchParams {
+  token?: string;
+  email?: string;
+  category?: string;
 }
 
-export default function UnsubscribePage() {
+export const dynamic = "force-dynamic";
+
+export default async function UnsubscribePage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const params = await searchParams;
+  const token = (params.token ?? "").trim();
+  const explicitEmail = (params.email ?? "").trim();
+  const category = (params.category ?? "").trim() || undefined;
+
+  const user = token
+    ? await prisma.user.findUnique({
+        where: { unsubscribeToken: token },
+        select: { email: true, locale: true },
+      })
+    : null;
+  const dict = getUnsubscribeDict(user?.locale ?? null);
+
   return (
     <div
       style={{
@@ -108,9 +74,44 @@ export default function UnsubscribePage() {
         h1 { margin: 0 0 16px; font-size: 20px; }
         p { line-height: 1.6; margin: 8px 0; }
       `}</style>
-      <Suspense fallback={<div className="card"><p>加载中...</p></div>}>
-        <UnsubscribeContent />
-      </Suspense>
+      {(() => {
+        if (!token) {
+          return (
+            <div className="card">
+              <h1>{dict.invalidTitle}</h1>
+              <p>{dict.invalidMissingToken}</p>
+            </div>
+          );
+        }
+        const masked = maskEmail(
+          user?.email ?? explicitEmail,
+          dict.pageMaskedFallback,
+        );
+        return (
+          <div className="card">
+            <h1>{dict.pageConfirmTitle}</h1>
+            <p>
+              {category
+                ? dict.pageConfirmCategory(masked, category)
+                : dict.pageConfirmGlobal(masked)}
+            </p>
+            <UnsubscribeForm
+              token={token}
+              category={category}
+              labels={{
+                confirm: dict.pageButtonConfirm,
+                processing: dict.pageButtonProcessing,
+                done: dict.pageButtonDone,
+                failed: dict.pageButtonFailed,
+                network: dict.pageNetworkError,
+                doneText: category
+                  ? dict.pageDoneCategory(category)
+                  : dict.pageDoneGlobal,
+              }}
+            />
+          </div>
+        );
+      })()}
     </div>
   );
 }

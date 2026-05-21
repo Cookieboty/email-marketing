@@ -195,10 +195,13 @@ export default function UsersImportPage() {
               <details className="rounded-md border bg-muted/30 p-3 text-xs">
                 <summary className="cursor-pointer font-medium">CSV 列示例</summary>
                 <pre className="mt-2 overflow-x-auto whitespace-pre text-[11px] leading-5">
-{`externalId,email,name,tags,userLevel,totalSpend,orderCount,lastOrderAt
-ext-001,alice@example.com,Alice,"vip,active",vip,1250.00,15,2026-05-12T00:00:00Z
-ext-002,bob@example.com,Bob,,,,0,`}
+                  {`externalId,email,name,tags,userLevel,totalSpend,orderCount,lastOrderAt,locale
+ext-001,alice@example.com,Alice,"vip,active",vip,1250.00,15,2026-05-12T00:00:00Z,zh
+ext-002,bob@example.com,Bob,,,,0,,en`}
                 </pre>
+                <p className="mt-2 text-muted-foreground">
+                  <code>locale</code> 可选值：<code>zh</code>、<code>en</code>，留空表示未指定（沿用模板默认语言）。无效值会按行返回错误明细，但不会中断整体导入。
+                </p>
               </details>
             </div>
           ) : (
@@ -209,12 +212,12 @@ ext-002,bob@example.com,Bob,,,,0,`}
                 value={jsonText}
                 onChange={(e) => setJsonText(e.target.value)}
                 rows={12}
-                placeholder='[{"email":"alice@example.com","name":"Alice","tags":["vip"]}]'
+                placeholder='[{"email":"alice@example.com","name":"Alice","tags":["vip"],"locale":"zh"}]'
                 data-testid="users-import-json"
                 className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                可直接传入数组，或包装为 <code>{`{ "users": [...] }`}</code>。
+                可直接传入数组，或包装为 <code>{`{ "users": [...] }`}</code>。可附带 <code>locale</code> 字段（<code>zh</code>/<code>en</code>），不传或传 <code>null</code> 表示未指定。
               </p>
             </div>
           )}
@@ -309,16 +312,14 @@ function SummaryStat({
 }) {
   return (
     <div
-      className={`rounded-md border p-3 ${
-        tone === "danger" && value > 0 ? "border-destructive/40 bg-destructive/5" : ""
-      }`}
+      className={`rounded-md border p-3 ${tone === "danger" && value > 0 ? "border-destructive/40 bg-destructive/5" : ""
+        }`}
       data-testid={testId}
     >
       <div className="text-xs text-muted-foreground">{label}</div>
       <div
-        className={`mt-1 text-2xl font-semibold ${
-          tone === "danger" && value > 0 ? "text-destructive" : ""
-        }`}
+        className={`mt-1 text-2xl font-semibold ${tone === "danger" && value > 0 ? "text-destructive" : ""
+          }`}
       >
         {value}
       </div>

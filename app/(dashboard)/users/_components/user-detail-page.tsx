@@ -20,6 +20,12 @@ import { TagPicker } from "@/components/tag-picker";
 import { apiDelete, apiPatch, apiPost, swrFetcher, type ApiClientError } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import UserSubscriptionsCard from "./user-subscriptions-card";
+import type { Locale } from "@/app/(dashboard)/templates/_components/types";
+import {
+  diffUserLocale,
+  parseLocaleFormValue,
+  type UserLocale,
+} from "./user-locale-helpers";
 
 interface UserDetail {
   id: string;
@@ -32,6 +38,7 @@ interface UserDetail {
   orderCount: number;
   unsubscribed: boolean;
   optInStatus: string;
+  locale: Locale | null;
   createdAt: string;
   updatedAt: string;
   tags: { id: string; name: string; color?: string | null }[];
@@ -52,6 +59,7 @@ const Schema = z.object({
       (v) => v === undefined || v === "" || (Number.isInteger(Number(v)) && Number(v) >= 0),
       "需为非负整数",
     ),
+  locale: z.enum(["", "zh", "en"]).optional(),
 });
 type FormValues = z.infer<typeof Schema>;
 
@@ -86,6 +94,7 @@ export default function UserDetailPage({ id }: { id: string }) {
       userLevel: data.userLevel ?? "",
       totalSpend: data.totalSpend != null ? String(data.totalSpend) : "",
       orderCount: String(data.orderCount ?? 0),
+      locale: (data.locale ?? "") as "" | "zh" | "en",
     });
     setTagIds(data.tags.map((t) => t.id));
   }, [data, reset]);
@@ -117,6 +126,12 @@ export default function UserDetailPage({ id }: { id: string }) {
     if (v.userLevel !== undefined) payload.userLevel = v.userLevel === "" ? null : v.userLevel;
     if (v.totalSpend !== undefined && v.totalSpend !== "") payload.totalSpend = v.totalSpend;
     if (v.orderCount !== undefined && v.orderCount !== "") payload.orderCount = Number(v.orderCount);
+    if (v.locale !== undefined) {
+      const nextLocale: UserLocale = parseLocaleFormValue(v.locale);
+      const original: UserLocale = data?.locale ?? null;
+      const diff = diffUserLocale(nextLocale, original);
+      if (diff.changed) payload.locale = diff.value;
+    }
     try {
       await apiPatch(`/api/users/${id}`, payload);
       toast({ title: "已保存" });
@@ -242,6 +257,22 @@ export default function UserDetailPage({ id }: { id: string }) {
                   {formState.errors.orderCount ? (
                     <p className="text-xs text-destructive">{formState.errors.orderCount.message}</p>
                   ) : null}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="user-locale">语言偏好</Label>
+                  <select
+                    id="user-locale"
+                    data-testid="user-locale-select"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    {...register("locale")}
+                  >
+                    <option value="">未指定</option>
+                    <option value="zh">中文</option>
+                    <option value="en">English</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    用于多语言模板的自动语言决策；未指定则使用模板默认语言。
+                  </p>
                 </div>
               </div>
               <Button type="submit" disabled={formState.isSubmitting} data-testid="user-edit-submit">

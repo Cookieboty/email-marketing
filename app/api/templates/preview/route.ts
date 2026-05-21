@@ -3,6 +3,7 @@ import { withAuth, parseJsonBody } from "@/lib/api-helpers";
 import { verifyOrigin } from "@/lib/auth/origin";
 import { ForbiddenError } from "@/lib/errors";
 import { PreviewTemplateSchema } from "@/lib/modules/template/schema";
+import { withLocalizedBuiltinText } from "@/lib/modules/template/render";
 import { sanitizeHtml } from "@/lib/modules/template/service";
 import { extractVariables, render } from "@/lib/template-engine";
 
@@ -18,14 +19,20 @@ export const POST = withAuth(async (_session, request: Request) => {
   const subject = input.subject ?? "";
   const html = input.htmlContent ? sanitizeHtml(input.htmlContent) : "";
   const text = input.textContent ?? "";
+  const builtin = withLocalizedBuiltinText(input.locale, {
+    unsubscribeUrl: input.unsubscribeUrl,
+    unsubscribeTopicUrl: input.unsubscribeTopicUrl,
+  });
   const renderedSubject = render(subject, input.variables ?? {}, {
     missing: input.missingStrategy,
+    builtin,
   });
   const renderedHtml = render(html, input.variables ?? {}, {
     missing: input.missingStrategy,
+    builtin,
   });
   const renderedText = text
-    ? render(text, input.variables ?? {}, { missing: input.missingStrategy })
+    ? render(text, input.variables ?? {}, { missing: input.missingStrategy, builtin })
     : null;
   const detectedVariables = Array.from(
     new Set([

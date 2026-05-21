@@ -104,6 +104,7 @@ async function findUserByToken(token: string) {
     select: {
       id: true,
       email: true,
+      locale: true,
       unsubscribed: true,
       unsubscribedAt: true,
     },
@@ -163,6 +164,7 @@ export async function GET(
       user: {
         id: user.id,
         emailMasked: maskEmail(user.email),
+        locale: user.locale,
         unsubscribed: user.unsubscribed,
         unsubscribedAt: user.unsubscribedAt,
       },
@@ -295,6 +297,7 @@ export async function PATCH(
       user: {
         id: user.id,
         emailMasked: maskEmail(user.email),
+        locale: user.locale,
         unsubscribed: refreshed?.unsubscribed ?? user.unsubscribed,
         unsubscribedAt: refreshed?.unsubscribedAt ?? user.unsubscribedAt,
       },

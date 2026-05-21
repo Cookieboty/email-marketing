@@ -23,6 +23,7 @@ export const templateBlockRepository = {
   ): Promise<ListTemplateBlocksResult> {
     const where: Prisma.TemplateBlockWhereInput = {};
     if (query.category) where.category = query.category;
+    if (query.locale) where.locale = query.locale;
     if (query.q) where.name = { contains: query.q, mode: "insensitive" };
     const [total, rows] = await Promise.all([
       db.templateBlock.count({ where }),

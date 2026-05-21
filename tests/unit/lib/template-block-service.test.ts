@@ -36,6 +36,7 @@ const fakeBlock = (overrides: Partial<{ isSystem: boolean }> = {}) => ({
   id: "b1",
   name: "Footer",
   category: null,
+  locale: "zh",
   htmlContent: "<footer>{{x}}</footer>",
   variables: ["x"],
   isSystem: overrides.isSystem ?? false,
@@ -53,6 +54,7 @@ describe("templateBlockService.create", () => {
       {
         name: "Footer",
         category: null,
+        locale: "en",
         htmlContent: `<footer><script>x</script>Hi {{user_name}}</footer>`,
       },
       ctx,
@@ -62,6 +64,7 @@ describe("templateBlockService.create", () => {
     expect(data.htmlContent).not.toMatch(/<script/i);
     expect(data.variables).toEqual(["user_name"]);
     expect(data.isSystem).toBe(false);
+    expect(data.locale).toBe("en");
   });
 });
 
@@ -89,6 +92,14 @@ describe("templateBlockService.update", () => {
     );
     const data = repo.update.mock.calls[0]![1];
     expect(data.variables).toEqual({ set: ["a", "b"] });
+  });
+
+  it("passes locale updates to repository", async () => {
+    repo.findById.mockResolvedValue(fakeBlock() as never);
+    repo.update.mockResolvedValue(fakeBlock() as never);
+    await templateBlockService.update("b1", { locale: "en" }, ctx);
+    const data = repo.update.mock.calls[0]![1];
+    expect(data.locale).toBe("en");
   });
 });
 

@@ -47,11 +47,19 @@ export interface UpsertByExternalIdOrEmailInput {
   externalId?: string | null;
   name?: string | null;
   metadata?: Record<string, unknown> | null;
+  locale?: "zh" | "en" | null;
   /** 标签名列表；不存在的自动创建。 */
   tags?: string[];
   /** 标签合并模式，默认 merge。 */
   tagMode?: UpsertTagMode;
   source?: string | null;
+  userLevel?: string | null;
+  /** Prisma Decimal: pass as string "123.45" */
+  totalSpend?: string | null;
+  orderCount?: number | null;
+  balance?: number | null;
+  usedQuota?: number | null;
+  requestCount?: number | null;
 }
 
 export interface UpsertActor {
@@ -119,15 +127,23 @@ export async function upsertByExternalIdOrEmail(
       const data: Prisma.UserUncheckedUpdateInput = {};
       if (input.name !== undefined) data.name = input.name ?? null;
       if (input.source !== undefined) data.source = input.source ?? null;
+      if (input.locale !== undefined) data.locale = input.locale;
       if (input.metadata !== undefined) {
         data.metadata =
           input.metadata === null
             ? PrismaNS.JsonNull
             : (input.metadata as Prisma.InputJsonValue);
       }
+      if (input.userLevel !== undefined && target.userLevel !== "business") {
+        data.userLevel = input.userLevel;
+      }
+      if (input.totalSpend !== undefined) data.totalSpend = input.totalSpend;
+      if (input.orderCount !== undefined) data.orderCount = input.orderCount;
+      if (input.balance !== undefined) data.balance = input.balance;
+      if (input.usedQuota !== undefined) data.usedQuota = input.usedQuota;
+      if (input.requestCount !== undefined) data.requestCount = input.requestCount;
+
       if (externalId && !target.externalId) data.externalId = externalId;
-      // 若现有用户 email 与 input.email 不一致（被 externalId 命中场景），不覆盖 email
-      // 以避免与他人冲突；email 仅在创建时设定。
 
       let updated = target;
       if (Object.keys(data).length > 0) {
@@ -174,10 +190,17 @@ export async function upsertByExternalIdOrEmail(
       externalId,
       name: input.name ?? null,
       source: input.source ?? null,
+      locale: input.locale ?? null,
       metadata:
         input.metadata === undefined || input.metadata === null
           ? undefined
           : (input.metadata as Prisma.InputJsonValue),
+      userLevel: input.userLevel ?? undefined,
+      totalSpend: input.totalSpend ?? undefined,
+      orderCount: input.orderCount ?? undefined,
+      balance: input.balance ?? undefined,
+      usedQuota: input.usedQuota ?? undefined,
+      requestCount: input.requestCount ?? undefined,
     };
     if (env().DOUBLE_OPT_IN_ENABLED) {
       createData.optInStatus = OptInStatus.PENDING;

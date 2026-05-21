@@ -45,6 +45,7 @@ export const templateBlockService = {
     const block = await templateBlockRepository.create({
       name: input.name,
       category: input.category ?? null,
+      locale: input.locale,
       htmlContent: html,
       variables,
       isSystem: false,
@@ -73,6 +74,7 @@ export const templateBlockService = {
     const data: Prisma.TemplateBlockUncheckedUpdateInput = {};
     if (input.name !== undefined) data.name = input.name;
     if (input.category !== undefined) data.category = input.category ?? null;
+    if (input.locale !== undefined) data.locale = input.locale;
     if (input.htmlContent !== undefined) {
       const html = sanitizeHtml(input.htmlContent);
       data.htmlContent = html;

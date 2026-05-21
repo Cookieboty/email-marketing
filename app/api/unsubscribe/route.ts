@@ -23,6 +23,10 @@ import { z, ZodError } from "zod";
 import { handleApiError, RateLimitError, ValidationError } from "@/lib/errors";
 import { getRateLimiter, getClientIp } from "@/lib/rate-limit";
 import { subscriptionUnsubscribeService } from "@/lib/modules/subscription-category/unsubscribe";
+import {
+  getUnsubscribeDict,
+  type UnsubscribeLocale,
+} from "@/lib/modules/subscription-category/unsubscribe-i18n";
 
 export const runtime = "nodejs";
 
@@ -143,6 +147,10 @@ async function readPostInputs(request: Request): Promise<PostInputs> {
   return { token, category, topic };
 }
 
+function localeDict(user: { locale: UnsubscribeLocale | null } | null | undefined) {
+  return getUnsubscribeDict(user?.locale ?? null);
+}
+
 export async function GET(request: Request): Promise<NextResponse> {
   try {
     checkRateLimit(request.headers);
@@ -153,10 +161,13 @@ export async function GET(request: Request): Promise<NextResponse> {
   const token = url.searchParams.get("token") ?? "";
   const categoryRaw = url.searchParams.get("category") ?? undefined;
   const topicRaw = url.searchParams.get("topic") ?? undefined;
+  // spec §605：退订页按用户 locale 渲染；token 解析失败前没有 user 信息，落回
+  // 默认 locale 即可（fallback 见 unsubscribe-i18n.ts）。
+  const fallback = getUnsubscribeDict(null);
   if (!token) {
     return htmlPage(
-      "退订链接无效",
-      "<h1>退订链接无效</h1><p>缺少必要的 token 参数。请检查邮件中的链接是否完整。</p>",
+      fallback.invalidTitle,
+      `<h1>${fallback.invalidTitle}</h1><p>${fallback.invalidMissingToken}</p>`,
       400,
     );
   }
@@ -168,40 +179,42 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (topicRaw) topic = SlugSchema.parse(topicRaw);
   } catch {
     return htmlPage(
-      "退订链接无效",
-      "<h1>退订链接无效</h1><p>链接格式错误。请检查邮件中的链接是否完整。</p>",
+      fallback.invalidTitle,
+      `<h1>${fallback.invalidTitle}</h1><p>${fallback.invalidBody}</p>`,
       400,
     );
   }
 
   try {
-    // 优先级：topic > category > global
     if (topic) {
       const out = await subscriptionUnsubscribeService.unsubscribeByTopic({
         token,
         topicSlug: topic,
         req: { headers: request.headers },
       });
+      const dict = localeDict("user" in out ? out.user : null);
       switch (out.status) {
-        case "topic_unsubscribed":
+        case "topic_unsubscribed": {
+          const name = escapeHtml(out.topic.name);
           return htmlPage(
-            "已退订该主题",
+            out.alreadyUnsubscribed ? dict.topicAlreadyTitle : dict.topicSuccessTitle,
             out.alreadyUnsubscribed
-              ? `<h1>您已退订</h1><p>您此前已退订「${escapeHtml(out.topic.name)}」主题，本次操作无变化。</p>`
-              : `<h1>退订成功</h1><p>您已成功退订「${escapeHtml(out.topic.name)}」主题，仍可继续接收其他主题与分类的邮件。</p>`,
+              ? `<h1>${dict.topicAlreadyTitle}</h1><p>${dict.topicAlreadyBody(name)}</p>`
+              : `<h1>${dict.topicSuccessTitle}</h1><p>${dict.topicSuccessBody(name)}</p>`,
             200,
           );
+        }
         case "topic_not_found":
           return htmlPage(
-            "主题不存在",
-            "<h1>主题已下线</h1><p>该主题已被移除，本次操作未生效。如需全局退订，请使用邮件中的「退订所有邮件」链接。</p>",
+            dict.topicNotFoundTitle,
+            `<h1>${dict.topicNotFoundTitle}</h1><p>${dict.topicNotFoundBody}</p>`,
             404,
           );
         case "user_not_found":
         default:
           return htmlPage(
-            "退订链接无效",
-            "<h1>退订链接无效</h1><p>未找到匹配的订阅记录，链接可能已失效。</p>",
+            fallback.invalidTitle,
+            `<h1>${fallback.invalidTitle}</h1><p>${fallback.invalidBody}</p>`,
             404,
           );
       }
@@ -212,38 +225,43 @@ export async function GET(request: Request): Promise<NextResponse> {
       categorySlug: category ?? null,
       req: { headers: request.headers },
     });
+    const dict = localeDict("user" in out ? out.user : null);
     switch (out.status) {
       case "global_unsubscribed":
         return htmlPage(
-          "已退订",
+          out.alreadyUnsubscribed ? dict.globalAlreadyTitle : dict.globalSuccessTitle,
           out.alreadyUnsubscribed
-            ? "<h1>您已退订</h1><p>您此前已退订所有邮件，本次操作无变化。</p>"
-            : "<h1>退订成功</h1><p>您已成功退订全部邮件，将不再收到我们的任何邮件通知。</p>",
+            ? `<h1>${dict.globalAlreadyTitle}</h1><p>${dict.globalAlreadyBody}</p>`
+            : `<h1>${dict.globalSuccessTitle}</h1><p>${dict.globalSuccessBody}</p>`,
           200,
         );
       case "category_unsubscribed":
         return htmlPage(
-          "已退订该分类",
-          `<h1>退订成功</h1><p>您已成功退订「${escapeHtml(out.category.name)}」分类，仍可继续接收其他类型的邮件。</p>`,
+          dict.categorySuccessTitle,
+          `<h1>${dict.categorySuccessTitle}</h1><p>${dict.categorySuccessBody(
+            escapeHtml(out.category.name),
+          )}</p>`,
           200,
         );
       case "category_ignored_transactional":
         return htmlPage(
-          "无法退订该分类",
-          `<h1>该邮件不可退订</h1><p>「${escapeHtml(out.category.name)}」属于交易类通知（如订单确认、账户安全），按法规和安全要求不可退订。</p>`,
+          dict.categoryTransactionalTitle,
+          `<h1>${dict.categoryTransactionalTitle}</h1><p>${dict.categoryTransactionalBody(
+            escapeHtml(out.category.name),
+          )}</p>`,
           200,
         );
       case "category_not_found":
         return htmlPage(
-          "分类不存在",
-          "<h1>分类已下线</h1><p>该订阅分类已被移除，本次操作未生效。如需全局退订，请使用邮件中的「退订所有邮件」链接。</p>",
+          dict.categoryNotFoundTitle,
+          `<h1>${dict.categoryNotFoundTitle}</h1><p>${dict.categoryNotFoundBody}</p>`,
           404,
         );
       case "user_not_found":
       default:
         return htmlPage(
-          "退订链接无效",
-          "<h1>退订链接无效</h1><p>未找到匹配的订阅记录，链接可能已失效。</p>",
+          fallback.invalidTitle,
+          `<h1>${fallback.invalidTitle}</h1><p>${fallback.invalidBody}</p>`,
           404,
         );
     }

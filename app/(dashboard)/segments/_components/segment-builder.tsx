@@ -35,6 +35,9 @@ const FIELD_LABEL: Record<SegmentField, string> = {
   totalBounceCount: "硬退信次数",
   totalOpens: "总打开次数",
   totalClicks: "总点击次数",
+  balance: "AI 余额",
+  usedQuota: "已用额度",
+  requestCount: "调用次数",
   lastOrderAt: "最近下单时间",
   createdAt: "用户创建时间",
   unsubscribed: "是否退订",
@@ -68,6 +71,9 @@ const NUMBER_FIELDS = [
   "totalBounceCount",
   "totalOpens",
   "totalClicks",
+  "balance",
+  "usedQuota",
+  "requestCount",
 ] as const;
 const DATETIME_FIELDS = ["lastOrderAt", "createdAt"] as const;
 const BEHAVIOR_FIELDS = [

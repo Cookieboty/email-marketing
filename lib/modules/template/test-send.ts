@@ -15,14 +15,20 @@ import { audit } from "@/lib/audit";
 import { normalizeEmail } from "@/lib/email-utils";
 import { __resetRateLimiters, getRateLimiter } from "@/lib/rate-limit";
 import { sendSingle, type SendResult } from "@/lib/resend";
-import { render } from "@/lib/template-engine";
-import type { EmailTemplate } from "@prisma/client";
+import {
+  buildTemplateSnapshot,
+  type TemplateWithLocalesForSnapshot,
+} from "@/lib/modules/template/snapshot";
+import { renderSnapshotContent } from "@/lib/modules/template/render";
+import type { Locale } from "@prisma/client";
 
 export interface TestSendContext {
   adminId: string; // 来自 SessionPayload.sessionId
   to: string;
   variables?: Record<string, string>;
-  template: EmailTemplate;
+  locale?: Locale;
+  subjects?: Partial<Record<Locale, string>>;
+  template: TemplateWithLocalesForSnapshot & { id: string; name: string };
   req?: { headers: Headers } | null;
 }
 
@@ -82,19 +88,21 @@ export async function testSendTemplate(ctx: TestSendContext): Promise<SendResult
     userName: ctx.variables?.user_name ?? "测试用户",
     campaignName: "[测试发送] " + ctx.template.name,
   };
-  const subject = render(ctx.template.subject, ctx.variables ?? {}, { builtin });
-  const html = render(ctx.template.htmlContent, ctx.variables ?? {}, { builtin });
-  const text = ctx.template.textContent
-    ? render(ctx.template.textContent, ctx.variables ?? {}, { builtin })
-    : undefined;
+  const rendered = renderSnapshotContent({
+    snapshot: buildTemplateSnapshot(ctx.template),
+    resolvedLocale: ctx.locale ?? ctx.template.defaultLocale,
+    subjects: ctx.subjects,
+    variables: ctx.variables ?? {},
+    builtin,
+  });
 
   // 5. 发送
   const result = await sendSingle({
     from: fromAddr,
     to: target,
-    subject: `[TEST] ${subject}`,
-    html,
-    ...(text ? { text } : {}),
+    subject: `[TEST] ${rendered.subject}`,
+    html: rendered.html,
+    ...(rendered.text ? { text: rendered.text } : {}),
     headers: {
       "X-Email-Test-Send": "1",
       "X-Template-Id": ctx.template.id,

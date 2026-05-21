@@ -14,7 +14,8 @@
  *   }
  *
  * key（左侧）：
- *   - 顶层字段：email | name | externalId | source | tags
+ *   - 顶层字段：email | name | externalId | source | tags | locale
+ *     | userLevel | totalSpend | orderCount | balance | usedQuota | requestCount
  *   - metadata.* 任意子字段（写入 metadata JSON 对象）
  *   - 系统管控字段（unsubscribed/unsubscribeToken/engagementScore）一律拒绝
  *
@@ -36,8 +37,15 @@ export interface MappedUser {
   externalId?: string | null;
   name?: string | null;
   source?: string | null;
+  locale?: "zh" | "en" | null;
   metadata?: Record<string, unknown> | null;
   tags?: string[];
+  userLevel?: string | null;
+  totalSpend?: string | null;
+  orderCount?: number | null;
+  balance?: number | null;
+  usedQuota?: number | null;
+  requestCount?: number | null;
 }
 
 export interface MapRowError {
@@ -46,10 +54,14 @@ export interface MapRowError {
 }
 
 export type MapRowResult =
-  | { ok: true; mapped: MappedUser }
+  | { ok: true; mapped: MappedUser; warnings?: MapRowError[] }
   | { ok: false; errors: MapRowError[] };
 
-const ALLOWED_TOP_FIELDS = new Set(["email", "name", "externalId", "source", "tags"]);
+const ALLOWED_TOP_FIELDS = new Set([
+  "email", "name", "externalId", "source", "tags", "locale",
+  "userLevel", "totalSpend", "orderCount",
+  "balance", "usedQuota", "requestCount",
+]);
 const FORBIDDEN_FIELDS = new Set([
   "unsubscribed",
   "unsubscribeToken",
@@ -176,6 +188,24 @@ function asString(v: unknown): string | null {
   return null;
 }
 
+function asFiniteNumber(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function asInt(v: unknown): number | null {
+  const n = asFiniteNumber(v);
+  if (n === null) return null;
+  return Math.trunc(n);
+}
+
+function asDecimalString(v: unknown): string | null {
+  const n = asFiniteNumber(v);
+  if (n === null) return null;
+  return n.toFixed(2);
+}
+
 function asTagArray(v: unknown): string[] {
   if (v === null || v === undefined) return [];
   if (Array.isArray(v)) {
@@ -197,6 +227,7 @@ function asTagArray(v: unknown): string[] {
  */
 export function mapRow(raw: unknown, fieldMapping: FieldMapping): MapRowResult {
   const errors: MapRowError[] = [];
+  const warnings: MapRowError[] = [];
   const mapped: MappedUser = { email: "" };
   const metadata: Record<string, unknown> = {};
   let metadataTouched = false;
@@ -231,6 +262,31 @@ export function mapRow(raw: unknown, fieldMapping: FieldMapping): MapRowResult {
       mapped.externalId = s && s.trim().length > 0 ? s.trim() : null;
     } else if (target === "source") {
       mapped.source = asString(value);
+    } else if (target === "locale") {
+      const s = asString(value);
+      if (s === "zh" || s === "en") {
+        mapped.locale = s;
+      } else if (s === null || s.trim().length === 0) {
+        mapped.locale = null;
+      } else {
+        mapped.locale = null;
+        warnings.push({ field: "locale", message: `invalid locale: ${s}` });
+      }
+    } else if (target === "userLevel") {
+      const s = asString(value);
+      mapped.userLevel = s && s.trim().length > 0 ? s.trim() : null;
+    } else if (target === "totalSpend") {
+      const s = asDecimalString(value);
+      if (s === null && value !== null && value !== undefined) {
+        warnings.push({ field: "totalSpend", message: `invalid number: ${String(value).slice(0, 50)}` });
+      }
+      mapped.totalSpend = s;
+    } else if (target === "orderCount" || target === "balance" || target === "usedQuota" || target === "requestCount") {
+      const n = asInt(value);
+      if (n === null && value !== null && value !== undefined) {
+        warnings.push({ field: target, message: `invalid integer: ${String(value).slice(0, 50)}` });
+      }
+      mapped[target] = n;
     } else if (target === "tags") {
       mapped.tags = asTagArray(value);
     } else if (target.startsWith("metadata.")) {
@@ -259,7 +315,23 @@ export function mapRow(raw: unknown, fieldMapping: FieldMapping): MapRowResult {
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, mapped };
+
+  applyAmuxRoleDerivation(mapped, raw);
+
+  return warnings.length > 0 ? { ok: true, mapped, warnings } : { ok: true, mapped };
+}
+
+/**
+ * amux 专属派生：role >= 10 (admin/root) 强制 userLevel="admin"。
+ * 避免向员工发营销邮件。新接其他系统不应复用此函数。
+ */
+export function applyAmuxRoleDerivation(mapped: MappedUser, raw: unknown): void {
+  if (!raw || typeof raw !== "object") return;
+  const role = (raw as Record<string, unknown>).role;
+  const n = typeof role === "number" ? role : Number(role);
+  if (Number.isFinite(n) && n >= 10) {
+    mapped.userLevel = "admin";
+  }
 }
 
 export const __testing = { parseJsonPath, evalPath };

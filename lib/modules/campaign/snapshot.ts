@@ -1,9 +1,11 @@
-import type { Prisma } from "@prisma/client";
+import type { Locale, LocaleStrategy, Prisma } from "@prisma/client";
 import { env } from "@/lib/env";
 import { ValidationError } from "@/lib/errors";
 import { compileSegmentCondition } from "@/lib/modules/segment/compiler";
 import { isSuppressed } from "@/lib/modules/suppression/check";
 import { isOverLimit } from "@/lib/modules/frequency/check";
+import { resolveLocale } from "@/lib/modules/template/render";
+import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
 import type { PrismaTx } from "../user/repository";
 
 interface CampaignForSnapshot {
@@ -14,6 +16,9 @@ interface CampaignForSnapshot {
   subscriptionCategory: string | null;
   topicId: string | null;
   isAbTest: boolean;
+  localeStrategy: LocaleStrategy;
+  forcedLocale: Locale | null;
+  templateSnapshot: Prisma.JsonValue;
   segment: { id: string; conditions: Prisma.JsonValue } | null;
   variants: Array<{ id: string; samplePercentage: number }>;
 }
@@ -21,6 +26,7 @@ interface CampaignForSnapshot {
 interface EligibleUser {
   id: string;
   email: string;
+  locale: Locale | null;
   variantId?: string | null;
 }
 
@@ -98,7 +104,7 @@ export async function snapshotRecipients(
 
   const users = await tx.user.findMany({
     where,
-    select: { id: true, email: true },
+    select: { id: true, email: true, locale: true },
   });
 
   const filtered: EligibleUser[] = [];
@@ -113,7 +119,7 @@ export async function snapshotRecipients(
       }),
     );
     for (const r of results) {
-      if (r) filtered.push({ id: r.id, email: r.email, variantId: null });
+      if (r) filtered.push({ id: r.id, email: r.email, locale: r.locale, variantId: null });
     }
   }
 
@@ -134,6 +140,8 @@ export async function snapshotRecipients(
   }
 
   const INSERT_BATCH = 1000;
+  const snapshot = campaign.templateSnapshot as unknown as TemplateSnapshot;
+  const availableLocales = Object.keys(snapshot.locales) as Locale[];
   for (let i = 0; i < filtered.length; i += INSERT_BATCH) {
     const batch = filtered.slice(i, i + INSERT_BATCH);
     await tx.campaignRecipient.createMany({
@@ -141,6 +149,13 @@ export async function snapshotRecipients(
         campaignId: campaign.id,
         userId: u.id,
         variantId: u.variantId ?? null,
+        resolvedLocale: resolveLocale({
+          strategy: campaign.localeStrategy,
+          forcedLocale: campaign.forcedLocale,
+          userLocale: u.locale,
+          defaultLocale: snapshot.defaultLocale,
+          availableLocales,
+        }),
         status: "PENDING" as const,
       })),
       skipDuplicates: true,

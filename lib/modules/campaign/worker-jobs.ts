@@ -2,11 +2,12 @@ import type { CampaignStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
 import { sendBatch, sendSingle, type SendEmailInput } from "@/lib/resend";
-import { render } from "@/lib/template-engine";
 import { logger } from "@/lib/logger";
 import { isSuppressed } from "@/lib/modules/suppression/check";
 import { isOverLimit } from "@/lib/modules/frequency/check";
 import { evaluateDeliverability } from "@/lib/modules/subscription-category/unsubscribe";
+import { renderSnapshotContent, type TemplateVariantContent } from "@/lib/modules/template/render";
+import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
 import { campaignService } from "./service";
 import { snapshotRecipients } from "./snapshot";
 import { transformHtml } from "./html-transform";
@@ -67,11 +68,7 @@ export async function processSendQueue(): Promise<void> {
   const appUrl = e.APP_URL ?? "";
   const secret = e.SESSION_SECRET ?? "";
 
-  const snapshot = campaign.templateSnapshot as {
-    subject: string;
-    htmlContent: string;
-    textContent: string | null;
-  } | null;
+  const snapshot = campaign.templateSnapshot as unknown as TemplateSnapshot | null;
   if (!snapshot) {
     log.error("campaign missing templateSnapshot", { campaignId: campaign.id });
     return;
@@ -113,50 +110,83 @@ export async function processSendQueue(): Promise<void> {
   const recipientMap: Array<{ recipientId: string; userId: string }> = [];
 
   for (const r of recipients) {
-    const subject = r.variant?.subject ?? snapshot.subject;
-    const htmlContent = r.variant?.htmlContent ?? snapshot.htmlContent;
-    const unsubscribeUrl = `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}`;
-    const unsubscribeTopicUrl = campaign.topic
-      ? `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}&topic=${encodeURIComponent(campaign.topic.slug)}`
-      : "";
-    const builtin = {
-      unsubscribeUrl,
-      unsubscribeTopicUrl,
-      userEmail: r.user.email,
-      userName: r.user.name ?? "",
-      campaignName: campaign.name,
-    };
-    const renderedSubject = render(subject, {}, { builtin });
-    const renderedHtml = render(htmlContent, {}, { builtin });
-    const finalHtml = transformHtml(renderedHtml, {
-      campaignId: campaign.id,
-      recipientId: r.id,
-      appUrl,
-      sessionSecret: secret,
-      utmParams,
-    });
+    try {
+      const unsubscribeUrl = `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}`;
+      const unsubscribeTopicUrl = campaign.topic
+        ? `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}&topic=${encodeURIComponent(campaign.topic.slug)}`
+        : "";
+      const builtin = {
+        unsubscribeUrl,
+        unsubscribeTopicUrl,
+        userEmail: r.user.email,
+        userName: r.user.name ?? "",
+        campaignName: campaign.name,
+      };
+      const rendered = renderSnapshotContent({
+        snapshot,
+        resolvedLocale: r.resolvedLocale,
+        subjects: campaign.subjects as Record<string, string> | undefined,
+        variant: r.variant
+          ? ({
+            subjects: r.variant.subjects as Record<string, string>,
+            htmlContents: r.variant.htmlContents as Record<string, string>,
+            textContents: r.variant.textContents as Record<string, string | null> | undefined,
+          } satisfies TemplateVariantContent)
+          : null,
+        builtin,
+      });
+      const finalHtml = transformHtml(rendered.html, {
+        campaignId: campaign.id,
+        recipientId: r.id,
+        appUrl,
+        sessionSecret: secret,
+        utmParams,
+      });
 
-    const headers: Record<string, string> = {};
-    if (!subscriptionCategory?.isTransactional) {
-      const listUnsubUrl = unsubscribeTopicUrl || unsubscribeUrl;
-      headers["List-Unsubscribe"] = `<${listUnsubUrl}>`;
-      headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+      const headers: Record<string, string> = {};
+      if (!subscriptionCategory?.isTransactional) {
+        const listUnsubUrl = unsubscribeTopicUrl || unsubscribeUrl;
+        headers["List-Unsubscribe"] = `<${listUnsubUrl}>`;
+        headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
+      }
+
+      emails.push({
+        from: campaign.fromEmail,
+        to: r.user.email,
+        subject: rendered.subject,
+        html: finalHtml,
+        ...(rendered.text ? { text: rendered.text } : {}),
+        headers: Object.keys(headers).length > 0 ? headers : undefined,
+        tags: [
+          { name: "campaign_id", value: campaign.id },
+          ...(r.variantId ? [{ name: "variant_id", value: r.variantId }] : []),
+        ],
+      });
+      recipientMap.push({ recipientId: r.id, userId: r.user.id });
+    } catch (err) {
+      await prisma.campaignRecipient.update({
+        where: { id: r.id },
+        data: {
+          status: "FAILED",
+          failedAt: new Date(),
+          metadata: {
+            error: err instanceof Error ? err.message : "render_failed",
+          },
+        },
+      });
+      await prisma.campaign.update({
+        where: { id: campaign.id },
+        data: { failedCount: { increment: 1 } },
+      });
+      log.error("campaign recipient render failed", {
+        campaignId: campaign.id,
+        recipientId: r.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-
-    emails.push({
-      from: campaign.fromEmail,
-      to: r.user.email,
-      subject: renderedSubject,
-      html: finalHtml,
-      ...(snapshot.textContent ? { text: render(snapshot.textContent, {}, { builtin }) } : {}),
-      headers: Object.keys(headers).length > 0 ? headers : undefined,
-      tags: [
-        { name: "campaign_id", value: campaign.id },
-        ...(r.variantId ? [{ name: "variant_id", value: r.variantId }] : []),
-      ],
-    });
-    recipientMap.push({ recipientId: r.id, userId: r.user.id });
   }
+
+  if (emails.length === 0) return;
 
   const results = await sendBatch(emails);
 
@@ -342,9 +372,6 @@ export async function automationRunProcessor(): Promise<void> {
       }
 
       const e = env();
-      const template = run.automation.template;
-      const subject = template ? template.subject : run.automation.subject;
-      const htmlContent = template?.htmlContent ?? `<p>${run.automation.subject}</p>`;
       const unsubscribeUrl = `${e.APP_URL}/api/unsubscribe?token=${run.user.unsubscribeToken}`;
       const unsubscribeTopicUrl = run.automation.topic
         ? `${e.APP_URL}/api/unsubscribe?token=${run.user.unsubscribeToken}&topic=${encodeURIComponent(run.automation.topic.slug)}`
@@ -356,12 +383,20 @@ export async function automationRunProcessor(): Promise<void> {
         userName: run.user.name ?? "",
         campaignName: run.automation.name,
       };
+      // spec §25：严格只读发送快照。Automation.subjects 的覆盖已在 scheduleRun
+      // 时烘焙进 templateSnapshot，这里不再回查 live automation.subjects。
+      const rendered = renderSnapshotContent({
+        snapshot: run.templateSnapshot as unknown as TemplateSnapshot,
+        resolvedLocale: run.resolvedLocale,
+        builtin,
+      });
 
       const result = await sendSingle({
         from: e.EMAIL_FROM ?? "",
         to: run.user.email,
-        subject: render(subject, {}, { builtin }),
-        html: render(htmlContent, {}, { builtin }),
+        subject: rendered.subject,
+        html: rendered.html,
+        ...(rendered.text ? { text: rendered.text } : {}),
         headers: { "List-Unsubscribe": `<${unsubscribeTopicUrl || unsubscribeUrl}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
         tags: [{ name: "automation_id", value: run.automationId }],
       });
@@ -379,7 +414,13 @@ export async function automationRunProcessor(): Promise<void> {
 }
 
 export async function birthdayChecker(): Promise<void> {
-  const automations = await prisma.automation.findMany({ where: { status: "ENABLED", triggerType: "BIRTHDAY" } });
+  const { automationService: svc, SCHEDULE_RUN_INCLUDE } = await import(
+    "@/lib/modules/automation/service"
+  );
+  const automations = await prisma.automation.findMany({
+    where: { status: "ENABLED", triggerType: "BIRTHDAY" },
+    include: SCHEDULE_RUN_INCLUDE,
+  });
   if (automations.length === 0) return;
 
   const today = new Date();
@@ -395,10 +436,9 @@ export async function birthdayChecker(): Promise<void> {
       AND total_bounce_count < 3
   `;
 
-  const { automationService: svc } = await import("@/lib/modules/automation/service");
   for (const auto of automations) {
     for (const user of users) {
-      try { await svc.scheduleRun(auto.id, user.id, auto.delayMinutes); } catch (err) {
+      try { await svc.scheduleRun(auto, user.id, auto.delayMinutes); } catch (err) {
         log.error("birthday schedule failed", { automationId: auto.id, userId: user.id, error: err instanceof Error ? err.message : String(err) });
       }
     }
@@ -407,8 +447,13 @@ export async function birthdayChecker(): Promise<void> {
 }
 
 export async function reEngagementChecker(): Promise<void> {
-  const automations = await prisma.automation.findMany({ where: { status: "ENABLED", triggerType: "REENGAGEMENT" } });
-  const { automationService: svc } = await import("@/lib/modules/automation/service");
+  const { automationService: svc, SCHEDULE_RUN_INCLUDE } = await import(
+    "@/lib/modules/automation/service"
+  );
+  const automations = await prisma.automation.findMany({
+    where: { status: "ENABLED", triggerType: "REENGAGEMENT" },
+    include: SCHEDULE_RUN_INCLUDE,
+  });
 
   for (const auto of automations) {
     try {
@@ -422,7 +467,7 @@ export async function reEngagementChecker(): Promise<void> {
         select: { id: true },
         take: 500,
       });
-      for (const user of users) await svc.scheduleRun(auto.id, user.id, auto.delayMinutes);
+      for (const user of users) await svc.scheduleRun(auto, user.id, auto.delayMinutes);
       log.info("re-engagement check done", { automationId: auto.id, userCount: users.length });
     } catch (err) {
       log.error("re-engagement check failed", { automationId: auto.id, error: err instanceof Error ? err.message : String(err) });

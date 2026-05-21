@@ -20,6 +20,7 @@ export const POST = withAuth(async (session, request: Request, ctx: Ctx) => {
   const result = await testSendTemplate({
     adminId: session.sessionId,
     to: input.to,
+    locale: input.locale,
     variables: input.variables,
     template: tpl,
     req: { headers: request.headers },

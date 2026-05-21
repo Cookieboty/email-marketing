@@ -4,6 +4,10 @@ import { withAuth, parseJsonBody } from "@/lib/api-helpers";
 import { verifyOrigin } from "@/lib/auth/origin";
 import { ForbiddenError } from "@/lib/errors";
 import { campaignService } from "@/lib/modules/campaign/service";
+import {
+  snapshotToTemplateForTestSend,
+  type TemplateSnapshot,
+} from "@/lib/modules/template/snapshot";
 import { testSendTemplate } from "@/lib/modules/template/test-send";
 
 export const runtime = "nodejs";
@@ -14,6 +18,7 @@ interface Ctx {
 
 const TestSendSchema = z.object({
   to: z.string().email(),
+  locale: z.enum(["zh", "en"]).optional(),
   variables: z.record(z.string()).optional(),
 });
 
@@ -22,26 +27,18 @@ export const POST = withAuth(async (session, request: Request, ctx: Ctx) => {
   const { id } = await ctx.params;
   const input = await parseJsonBody(request, TestSendSchema);
   const campaign = await campaignService.getById(id);
-
-  const snapshot = campaign.templateSnapshot as {
-    subject: string;
-    htmlContent: string;
-    textContent: string | null;
-    version: number;
-  };
+  const snapshot = campaign.templateSnapshot as unknown as TemplateSnapshot;
 
   const result = await testSendTemplate({
     adminId: session.sessionId,
     to: input.to,
+    locale: input.locale,
+    subjects: campaign.subjects as Record<"zh" | "en", string> | undefined,
     variables: input.variables,
-    template: {
+    template: snapshotToTemplateForTestSend(snapshot, {
       id: campaign.templateId,
       name: campaign.name,
-      subject: campaign.subject ?? snapshot.subject,
-      htmlContent: snapshot.htmlContent,
-      textContent: snapshot.textContent,
-      version: snapshot.version,
-    } as Parameters<typeof testSendTemplate>[0]["template"],
+    }),
     req: { headers: request.headers },
   });
 

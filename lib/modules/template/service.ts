@@ -10,11 +10,17 @@
  *  - 唯一冲突 → ConflictError；缺失 → NotFoundError
  */
 
-import { Prisma, type EmailTemplate } from "@prisma/client";
+import { Locale, Prisma } from "@prisma/client";
 import { audit } from "@/lib/audit";
+import { prisma } from "@/lib/prisma";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
 import { extractVariables } from "@/lib/template-engine";
-import { templateRepository, TemplateVersionConflict } from "./repository";
+import {
+  templateRepository,
+  type ListTemplatesResult,
+  TemplateVersionConflict,
+  type EmailTemplateWithLocales,
+} from "./repository";
 import type {
   CreateTemplateInput,
   ListTemplatesQuery,
@@ -66,36 +72,104 @@ function buildVariableList(parts: Array<string | undefined | null>): string[] {
   return out;
 }
 
+type LocaleKey = "zh" | "en";
+interface TemplateListItem {
+  id: string;
+  name: string;
+  defaultLocale: Locale;
+  availableLocales: Locale[];
+  variables: string[];
+  version: number;
+  isArchived: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface TemplateListResult extends Omit<ListTemplatesResult, "data"> {
+  data: TemplateListItem[];
+}
+
+function entriesOfLocales<T>(
+  locales: Partial<Record<LocaleKey, T>>,
+): Array<[LocaleKey, T]> {
+  return Object.entries(locales).filter(
+    (entry): entry is [LocaleKey, T] => entry[1] !== undefined,
+  );
+}
+
+function variablesFromLocales(
+  locales: Array<{
+    subject: string;
+    htmlContent: string;
+    textContent?: string | null;
+  }>,
+): string[] {
+  return buildVariableList(
+    locales.flatMap((locale) => [
+      locale.subject,
+      locale.htmlContent,
+      locale.textContent,
+    ]),
+  );
+}
+
 export const templateService = {
-  list(query: ListTemplatesQuery) {
-    return templateRepository.list(query);
+  async list(query: ListTemplatesQuery): Promise<TemplateListResult> {
+    const result = await templateRepository.list(query);
+    return {
+      ...result,
+      data: result.data.map((template) => ({
+        id: template.id,
+        name: template.name,
+        defaultLocale: template.defaultLocale,
+        availableLocales: template.locales.map((locale) => locale.locale),
+        variables: template.variables,
+        version: template.version,
+        isArchived: template.isArchived,
+        createdAt: template.createdAt,
+        updatedAt: template.updatedAt,
+      })),
+    };
   },
 
-  async getById(id: string): Promise<EmailTemplate> {
+  async getById(id: string): Promise<EmailTemplateWithLocales> {
     const t = await templateRepository.findById(id);
     if (!t) throw new NotFoundError("Template not found");
     return t;
   },
 
-  async create(input: CreateTemplateInput, ctx: ActorContext): Promise<EmailTemplate> {
-    const html = sanitizeHtml(input.htmlContent);
-    const variables = buildVariableList([input.subject, html, input.textContent]);
+  async create(
+    input: CreateTemplateInput,
+    ctx: ActorContext,
+  ): Promise<EmailTemplateWithLocales> {
+    const localeRows = entriesOfLocales(input.locales).map(([locale, content]) => ({
+      locale: locale as Locale,
+      subject: content.subject,
+      htmlContent: sanitizeHtml(content.htmlContent),
+      textContent: content.textContent ?? null,
+    }));
+    const variables = variablesFromLocales(localeRows);
     try {
       const tpl = await templateRepository.create({
         name: input.name,
-        subject: input.subject,
-        htmlContent: html,
-        textContent: input.textContent ?? null,
+        defaultLocale: input.defaultLocale as Locale,
         variables,
         version: 1,
         isArchived: false,
+        locales: {
+          create: localeRows,
+        },
       });
       audit({
         action: "template.create",
         entityType: "EmailTemplate",
         entityId: tpl.id,
         actorType: ctx.actorType,
-        details: { name: tpl.name, variables },
+        details: {
+          name: tpl.name,
+          variables,
+          affectedLocales: localeRows.map((row) => row.locale),
+        },
         req: ctx.req ?? null,
       });
       return tpl;
@@ -109,7 +183,7 @@ export const templateService = {
     id: string,
     input: UpdateTemplateInput,
     ctx: ActorContext,
-  ): Promise<EmailTemplate> {
+  ): Promise<EmailTemplateWithLocales> {
     const existing = await templateRepository.findById(id);
     if (!existing) throw new NotFoundError("Template not found");
 
@@ -117,20 +191,76 @@ export const templateService = {
       throw new ConflictError("Template is in use by a SENDING campaign");
     }
 
-    const nextSubject = input.subject ?? existing.subject;
-    const nextHtml = input.htmlContent !== undefined ? sanitizeHtml(input.htmlContent) : existing.htmlContent;
-    const nextText = input.textContent !== undefined ? (input.textContent ?? null) : existing.textContent;
-    const nextVariables = buildVariableList([nextSubject, nextHtml, nextText]);
-
-    const data: Omit<Prisma.EmailTemplateUncheckedUpdateInput, "version"> = {};
-    if (input.name !== undefined) data.name = input.name;
-    data.subject = nextSubject;
-    data.htmlContent = nextHtml;
-    data.textContent = nextText;
-    data.variables = { set: nextVariables };
-
     try {
-      const tpl = await templateRepository.updateWithVersion(id, existing.version, data);
+      const affectedLocales = input.locales
+        ? entriesOfLocales(input.locales).map(([locale]) => locale)
+        : [];
+      const nextLocaleMap = new Map(
+        existing.locales.map((locale) => [locale.locale, {
+          subject: locale.subject,
+          htmlContent: locale.htmlContent,
+          textContent: locale.textContent,
+        }]),
+      );
+      if (input.locales) {
+        for (const [locale, content] of entriesOfLocales(input.locales)) {
+          const current = nextLocaleMap.get(locale as Locale);
+          nextLocaleMap.set(locale as Locale, {
+            subject: content.subject,
+            htmlContent: sanitizeHtml(content.htmlContent),
+            textContent:
+              content.textContent !== undefined
+                ? content.textContent
+                : current?.textContent ?? null,
+          });
+        }
+      }
+
+      const nextDefaultLocale = (input.defaultLocale ?? existing.defaultLocale) as Locale;
+      if (!nextLocaleMap.has(nextDefaultLocale)) {
+        throw new ValidationError("defaultLocale must exist in locales");
+      }
+      const nextVariables = variablesFromLocales(Array.from(nextLocaleMap.values()));
+
+      const tpl = await prisma.$transaction(async (tx) => {
+        const count = await tx.emailTemplate.updateMany({
+          where: { id, version: existing.version },
+          data: {
+            ...(input.name !== undefined ? { name: input.name } : {}),
+            defaultLocale: nextDefaultLocale,
+            variables: { set: nextVariables },
+            version: existing.version + 1,
+          },
+        });
+        if (count.count === 0) {
+          throw new TemplateVersionConflict(id, existing.version);
+        }
+        if (input.locales) {
+          for (const [locale, content] of entriesOfLocales(input.locales)) {
+            await tx.emailTemplateLocale.upsert({
+              where: { templateId_locale: { templateId: id, locale: locale as Locale } },
+              create: {
+                templateId: id,
+                locale: locale as Locale,
+                subject: content.subject,
+                htmlContent: sanitizeHtml(content.htmlContent),
+                textContent: content.textContent ?? null,
+              },
+              update: {
+                subject: content.subject,
+                htmlContent: sanitizeHtml(content.htmlContent),
+                ...(content.textContent !== undefined
+                  ? { textContent: content.textContent }
+                  : {}),
+              },
+            });
+          }
+        }
+        return (await tx.emailTemplate.findUnique({
+          where: { id },
+          include: { locales: true },
+        }))!;
+      });
       audit({
         action: "template.update",
         entityType: "EmailTemplate",
@@ -140,6 +270,7 @@ export const templateService = {
           name: tpl.name,
           version: tpl.version,
           fields: Object.keys(input),
+          affectedLocales,
         },
         req: ctx.req ?? null,
       });
@@ -153,7 +284,7 @@ export const templateService = {
     }
   },
 
-  async archive(id: string, ctx: ActorContext): Promise<EmailTemplate> {
+  async archive(id: string, ctx: ActorContext): Promise<EmailTemplateWithLocales> {
     const existing = await templateRepository.findById(id);
     if (!existing) throw new NotFoundError("Template not found");
     if (existing.isArchived) return existing;
@@ -169,7 +300,7 @@ export const templateService = {
     return tpl;
   },
 
-  async unarchive(id: string, ctx: ActorContext): Promise<EmailTemplate> {
+  async unarchive(id: string, ctx: ActorContext): Promise<EmailTemplateWithLocales> {
     const existing = await templateRepository.findById(id);
     if (!existing) throw new NotFoundError("Template not found");
     if (!existing.isArchived) return existing;
@@ -212,8 +343,56 @@ export const templateService = {
     });
   },
 
+  async deleteLocale(
+    id: string,
+    locale: Locale,
+    ctx: ActorContext,
+  ): Promise<EmailTemplateWithLocales> {
+    const existing = await templateRepository.findById(id);
+    if (!existing) throw new NotFoundError("Template not found");
+    if (existing.defaultLocale === locale) {
+      throw new ValidationError("Cannot delete default locale");
+    }
+    if (existing.locales.length <= 1) {
+      throw new ValidationError("Template must keep at least one locale");
+    }
+    if (!existing.locales.some((row) => row.locale === locale)) {
+      throw new NotFoundError("Template locale not found");
+    }
+
+    const tpl = await prisma.$transaction(async (tx) => {
+      await tx.emailTemplateLocale.delete({
+        where: { templateId_locale: { templateId: id, locale } },
+      });
+      const remaining = await tx.emailTemplateLocale.findMany({
+        where: { templateId: id },
+      });
+      const variables = variablesFromLocales(remaining);
+      await tx.emailTemplate.update({
+        where: { id },
+        data: {
+          variables: { set: variables },
+          version: existing.version + 1,
+        },
+      });
+      return (await tx.emailTemplate.findUnique({
+        where: { id },
+        include: { locales: true },
+      }))!;
+    });
+    audit({
+      action: "template.locale_delete",
+      entityType: "EmailTemplate",
+      entityId: id,
+      actorType: ctx.actorType,
+      details: { locale, version: tpl.version },
+      req: ctx.req ?? null,
+    });
+    return tpl;
+  },
+
   /** 选择模板创建活动前的可用性校验：归档模板不可用于新活动（specs §229/§325）。 */
-  assertUsableForNewCampaign(tpl: EmailTemplate): void {
+  assertUsableForNewCampaign(tpl: EmailTemplateWithLocales): void {
     if (tpl.isArchived) {
       throw new ValidationError("Archived template cannot be used for new campaigns");
     }

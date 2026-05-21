@@ -37,7 +37,6 @@ export const campaignRepository = {
     if (params.q) {
       where.OR = [
         { name: { contains: params.q, mode: "insensitive" } },
-        { subject: { contains: params.q, mode: "insensitive" } },
       ];
     }
 

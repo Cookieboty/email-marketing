@@ -37,6 +37,7 @@ interface BlockRow {
   id: string;
   name: string;
   category: string | null;
+  locale: "zh" | "en";
   htmlContent: string;
   variables: string[];
   isSystem: boolean;
@@ -54,9 +55,17 @@ interface ListResp {
 const FormSchema = z.object({
   name: z.string().trim().min(1, "请输入名称").max(128),
   category: z.string().trim().max(64).optional(),
+  locale: z.enum(["zh", "en"]),
   htmlContent: z.string().min(1, "请输入 HTML 内容"),
 });
 type FormValues = z.infer<typeof FormSchema>;
+
+const BLOCK_LOCALE_LABELS: Record<"zh" | "en", string> = {
+  zh: "中文",
+  en: "English",
+};
+
+type LocaleFilter = "all" | "zh" | "en";
 
 function asMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {
@@ -71,10 +80,12 @@ export default function TemplateBlocksPage() {
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
   const [q, setQ] = useState("");
+  const [localeFilter, setLocaleFilter] = useState<LocaleFilter>("all");
   const debouncedQ = useDebouncedValue(q, 300);
 
   const key = `${swrKeys.templateBlocks()}?${new URLSearchParams({
     ...(debouncedQ ? { q: debouncedQ } : {}),
+    ...(localeFilter !== "all" ? { locale: localeFilter } : {}),
     page: String(page),
     pageSize: String(pageSize),
   }).toString()}`;
@@ -110,6 +121,19 @@ export default function TemplateBlocksPage() {
           ) : (
             <span className="text-muted-foreground">-</span>
           ),
+      },
+      {
+        accessorKey: "locale",
+        header: "语言",
+        cell: ({ row }) => (
+          <Badge
+            variant="secondary"
+            className="text-[10px]"
+            data-testid={`block-locale-${row.original.id}`}
+          >
+            {BLOCK_LOCALE_LABELS[row.original.locale]}
+          </Badge>
+        ),
       },
       {
         accessorKey: "variables",
@@ -181,6 +205,28 @@ export default function TemplateBlocksPage() {
             }}
           />
         </div>
+        <div className="space-y-1.5">
+          <label
+            className="text-xs font-medium text-muted-foreground"
+            htmlFor="block-locale-filter"
+          >
+            语言
+          </label>
+          <select
+            id="block-locale-filter"
+            data-testid="block-locale-filter"
+            className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            value={localeFilter}
+            onChange={(e) => {
+              setLocaleFilter(e.target.value as LocaleFilter);
+              setPage(1);
+            }}
+          >
+            <option value="all">全部</option>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
       </div>
 
       <DataTable columns={columns} data={rows} loading={isLoading} emptyText="暂无模板片段" />
@@ -198,11 +244,12 @@ export default function TemplateBlocksPage() {
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         title="新增模板片段"
-        description="输入名称、分类（可选）和 HTML 内容"
+        description="输入名称、分类（可选）、语言和 HTML 内容"
         submit={async (v) => {
           await apiPost("/api/template-blocks", {
             name: v.name,
             category: v.category || null,
+            locale: v.locale,
             htmlContent: v.htmlContent,
           });
           toast({ title: "已创建" });
@@ -214,10 +261,15 @@ export default function TemplateBlocksPage() {
         open={editing !== null}
         onClose={() => setEditing(null)}
         title="编辑模板片段"
-        description="修改名称、分类或内容"
+        description="修改名称、分类、语言或内容"
         defaults={
           editing
-            ? { name: editing.name, category: editing.category ?? "", htmlContent: editing.htmlContent }
+            ? {
+              name: editing.name,
+              category: editing.category ?? "",
+              locale: editing.locale,
+              htmlContent: editing.htmlContent,
+            }
             : undefined
         }
         submit={async (v) => {
@@ -227,6 +279,7 @@ export default function TemplateBlocksPage() {
           if ((v.category ?? "") !== (editing.category ?? "")) {
             payload.category = v.category || null;
           }
+          if (v.locale !== editing.locale) payload.locale = v.locale;
           if (v.htmlContent !== editing.htmlContent) payload.htmlContent = v.htmlContent;
           if (Object.keys(payload).length === 0) {
             toast({ title: "未做修改" });
@@ -291,7 +344,8 @@ function BlockFormDialog({
     reset,
   } = useForm<FormValues>({
     resolver: zodResolver(FormSchema),
-    values: defaults ?? { name: "", category: "", htmlContent: "" },
+    values:
+      defaults ?? { name: "", category: "", locale: "zh", htmlContent: "" },
   });
 
   async function onSubmit(v: FormValues) {
@@ -335,6 +389,19 @@ function BlockFormDialog({
               <Label htmlFor="block-category">分类</Label>
               <Input id="block-category" placeholder="如：页头、页脚、CTA" {...register("category")} />
               {errors.category && <p className="text-xs text-destructive">{errors.category.message}</p>}
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="block-locale">语言</Label>
+              <select
+                id="block-locale"
+                data-testid="block-form-locale"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                {...register("locale")}
+              >
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </select>
+              {errors.locale && <p className="text-xs text-destructive">{errors.locale.message}</p>}
             </div>
           </div>
           <div className="space-y-1.5">

@@ -28,6 +28,17 @@ describe("CreateUserSchema", () => {
     expect(out.email).toBe("a@example.com");
   });
 
+  it("accepts zh/en locale", () => {
+    expect(CreateUserSchema.parse({ email: "a@example.com", locale: "zh" }).locale).toBe("zh");
+    expect(CreateUserSchema.parse({ email: "a@example.com", locale: "en" }).locale).toBe("en");
+  });
+
+  it("rejects region locale aliases", () => {
+    expect(() =>
+      CreateUserSchema.parse({ email: "a@example.com", locale: "zh-CN" }),
+    ).toThrow();
+  });
+
   it("rejects negative totalSpend", () => {
     expect(() =>
       CreateUserSchema.parse({ email: "a@example.com", totalSpend: -1 }),
@@ -63,6 +74,11 @@ describe("UpdateUserSchema", () => {
 
   it("rejects negative orderCount", () => {
     expect(() => UpdateUserSchema.parse({ orderCount: -1 })).toThrow();
+  });
+
+  it("allows clearing locale", () => {
+    const out = UpdateUserSchema.parse({ locale: null });
+    expect(out.locale).toBeNull();
   });
 });
 

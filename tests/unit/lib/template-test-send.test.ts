@@ -36,14 +36,23 @@ import { ForbiddenError, RateLimitError, ValidationError } from "@/lib/errors";
 const FAKE_TEMPLATE = {
   id: "tpl_1",
   name: "Welcome",
-  subject: "Hi {{user_name}}",
-  htmlContent: "<p>Hello {{user_name}}</p>",
-  textContent: null,
+  defaultLocale: "zh",
   variables: ["user_name"],
   version: 1,
-  isArchived: false,
-  createdAt: new Date(),
-  updatedAt: new Date(),
+  locales: [
+    {
+      locale: "zh",
+      subject: "Hi {{user_name}}",
+      htmlContent: "<p>Hello {{user_name}}</p>",
+      textContent: null,
+    },
+    {
+      locale: "en",
+      subject: "Hello {{user_name}}",
+      htmlContent: "<p>English {{user_name}}</p>",
+      textContent: null,
+    },
+  ],
 } as never;
 
 function setEnv(extra: Record<string, string | undefined>) {
@@ -111,6 +120,32 @@ describe("test-send: whitelist", () => {
     expect(call.to).toBe("qa@example.com");
     expect(call.subject.startsWith("[TEST] ")).toBe(true);
     expect(call.headers?.["X-Email-Test-Send"]).toBe("1");
+  });
+
+  it("renders the requested locale when provided", async () => {
+    await testSendTemplate({
+      adminId: "a1",
+      to: "qa@example.com",
+      template: FAKE_TEMPLATE,
+      locale: "en",
+      variables: { user_name: "Alice" },
+    });
+    const call = vi.mocked(sendSingle).mock.calls[0]![0];
+    expect(call.subject).toBe("[TEST] Hello Alice");
+    expect(call.html).toContain("English Alice");
+  });
+
+  it("uses subject override for requested locale", async () => {
+    await testSendTemplate({
+      adminId: "a1",
+      to: "qa@example.com",
+      template: FAKE_TEMPLATE,
+      locale: "en",
+      subjects: { en: "Override {{user_name}}" },
+      variables: { user_name: "Alice" },
+    });
+    const call = vi.mocked(sendSingle).mock.calls[0]![0];
+    expect(call.subject).toBe("[TEST] Override Alice");
   });
 });
 

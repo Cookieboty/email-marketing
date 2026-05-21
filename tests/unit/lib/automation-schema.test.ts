@@ -11,7 +11,7 @@ describe("automation schema", () => {
       const result = CreateAutomationSchema.safeParse({
         name: "Welcome Email",
         triggerType: "USER_CREATED",
-        subject: "Welcome!",
+        subjects: { zh: "Welcome!" },
       });
       expect(result.success).toBe(true);
     });
@@ -19,7 +19,7 @@ describe("automation schema", () => {
     it("rejects missing name", () => {
       const result = CreateAutomationSchema.safeParse({
         triggerType: "USER_CREATED",
-        subject: "Welcome!",
+        subjects: { zh: "Welcome!" },
       });
       expect(result.success).toBe(false);
     });
@@ -28,7 +28,25 @@ describe("automation schema", () => {
       const result = CreateAutomationSchema.safeParse({
         name: "Test",
         triggerType: "INVALID",
-        subject: "Welcome!",
+        subjects: { zh: "Welcome!" },
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects legacy top-level subject", () => {
+      const result = CreateAutomationSchema.safeParse({
+        name: "Test",
+        triggerType: "USER_CREATED",
+        subject: "legacy",
+        templateId: "tpl_1",
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("requires subjects when templateId is missing", () => {
+      const result = CreateAutomationSchema.safeParse({
+        name: "Test",
+        triggerType: "USER_CREATED",
       });
       expect(result.success).toBe(false);
     });
@@ -38,7 +56,7 @@ describe("automation schema", () => {
         const result = CreateAutomationSchema.safeParse({
           name: "Test",
           triggerType: tt,
-          subject: "Hello",
+          subjects: { zh: "Hello" },
         });
         expect(result.success).toBe(true);
       }
@@ -48,7 +66,7 @@ describe("automation schema", () => {
       const result = CreateAutomationSchema.parse({
         name: "Test",
         triggerType: "USER_CREATED",
-        subject: "Hello",
+        subjects: { zh: "Hello" },
       });
       expect(result.delayMinutes).toBe(0);
     });
@@ -57,7 +75,7 @@ describe("automation schema", () => {
       const result = CreateAutomationSchema.parse({
         name: "Test",
         triggerType: "USER_CREATED",
-        subject: "Hello",
+        subjects: { zh: "Hello" },
       });
       expect(result.status).toBe("DISABLED");
     });

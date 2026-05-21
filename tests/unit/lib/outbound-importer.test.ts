@@ -136,6 +136,7 @@ describe("outbound-importer / mapper", () => {
       email: "$.email",
       name: "$.full_name",
       externalId: "$.id",
+      locale: "$.locale",
       "metadata.phone": "$.phone",
       "metadata.level": "$.membership.level",
       tags: "$.labels[*].name",
@@ -145,6 +146,7 @@ describe("outbound-importer / mapper", () => {
         email: "a@b.com",
         full_name: "Alice",
         id: "u-1",
+        locale: "en",
         phone: "13800000000",
         membership: { level: "gold" },
         labels: [{ name: "vip" }, { name: "early" }],
@@ -155,8 +157,23 @@ describe("outbound-importer / mapper", () => {
     if (r.ok) {
       expect(r.mapped.email).toBe("a@b.com");
       expect(r.mapped.externalId).toBe("u-1");
+      expect(r.mapped.locale).toBe("en");
       expect(r.mapped.metadata).toEqual({ phone: "13800000000", level: "gold" });
       expect(r.mapped.tags).toEqual(["vip", "early"]);
+    }
+  });
+
+  it("mapRow: invalid locale becomes null with warning", () => {
+    const r = mapRow(
+      { email: "a@b.com", locale: "zh-CN" },
+      { email: "$.email", locale: "$.locale" },
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.mapped.locale).toBeNull();
+      expect(r.warnings).toEqual([
+        { field: "locale", message: "invalid locale: zh-CN" },
+      ]);
     }
   });
 

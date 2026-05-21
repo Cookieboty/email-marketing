@@ -17,6 +17,7 @@ const PUBLIC_API_PREFIXES = [
   "/api/confirm",
   "/api/preferences",
   "/api/events",
+  "/api/inbound",
 ];
 
 function isPublicPath(pathname: string): boolean {

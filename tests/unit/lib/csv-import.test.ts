@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseCsv,
+  parseLocaleCell,
   parseSubscriptionsCell,
   sanitizeCsvField,
 } from "@/lib/modules/import/csv";
@@ -118,5 +119,57 @@ describe("parseSubscriptionsCell", () => {
     expect(parseSubscriptionsCell("Marketing:true;news_letter:true;a b:true")).toEqual({
       marketing: true,
     });
+  });
+});
+
+describe("parseLocaleCell", () => {
+  it("returns undefined for nullish or empty input", () => {
+    expect(parseLocaleCell(undefined)).toBeUndefined();
+    expect(parseLocaleCell("")).toBeUndefined();
+    expect(parseLocaleCell("   ")).toBeUndefined();
+  });
+
+  it("returns null when caller passes explicit null", () => {
+    expect(parseLocaleCell(null)).toBeNull();
+  });
+
+  it("normalizes valid locales to lowercase", () => {
+    expect(parseLocaleCell("zh")).toBe("zh");
+    expect(parseLocaleCell("ZH")).toBe("zh");
+    expect(parseLocaleCell("En")).toBe("en");
+  });
+
+  it("returns 'invalid' marker for unsupported codes", () => {
+    expect(parseLocaleCell("ja")).toBe("invalid");
+    expect(parseLocaleCell("zh-CN")).toBe("invalid");
+  });
+});
+
+describe("parseCsv locale column", () => {
+  it("propagates valid locale and ignores blank values", () => {
+    const csv = [
+      "email,locale",
+      "a@x.com,zh",
+      "b@x.com,EN",
+      "c@x.com,",
+    ].join("\n");
+    const { rows, errors } = parseCsv(csv);
+    expect(errors).toEqual([]);
+    expect(rows[0]?.locale).toBe("zh");
+    expect(rows[1]?.locale).toBe("en");
+    expect(rows[2]?.locale).toBeUndefined();
+  });
+
+  it("collects warning row for unsupported locale codes", () => {
+    const csv = ["email,locale", "a@x.com,fr"].join("\n");
+    const { rows, errors } = parseCsv(csv);
+    expect(rows[0]?.locale).toBeUndefined();
+    expect(errors).toEqual([
+      expect.objectContaining({
+        row: 2,
+        email: "a@x.com",
+        reason: expect.stringContaining("Invalid locale"),
+      }),
+    ]);
   });
 });

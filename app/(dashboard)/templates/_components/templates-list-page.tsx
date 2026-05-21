@@ -13,31 +13,39 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Pagination } from "@/components/pagination";
 import {
   apiDelete,
+  apiGet,
   apiPost,
   swrFetcher,
 } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
-
-interface TemplateItem {
-  id: string;
-  name: string;
-  subject: string;
-  htmlContent: string;
-  textContent: string | null;
-  variables: string[];
-  version: number;
-  isArchived: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+import {
+  LOCALE_LABELS,
+  TEMPLATE_LOCALES,
+  type Locale,
+  type TemplateListItem,
+  type TemplateRecord,
+} from "./types";
 
 interface ListResp {
-  data: TemplateItem[];
+  data: TemplateListItem[];
   total: number;
   page: number;
   pageSize: number;
 }
+
+export type LocaleFilter = "all" | "zh" | "en" | "bilingual" | "single";
+
+const LOCALE_FILTER_OPTIONS: ReadonlyArray<{
+  value: LocaleFilter;
+  label: string;
+}> = [
+    { value: "all", label: "全部" },
+    { value: "zh", label: "包含中文" },
+    { value: "en", label: "包含英文" },
+    { value: "bilingual", label: "中英双语" },
+    { value: "single", label: "仅单语言" },
+  ];
 
 function asMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) {
@@ -53,11 +61,13 @@ export default function TemplatesListPage() {
   const [pageSize, setPageSize] = useState(20);
   const [q, setQ] = useState("");
   const [includeArchived, setIncludeArchived] = useState(false);
+  const [localeFilter, setLocaleFilter] = useState<LocaleFilter>("all");
   const debouncedQ = useDebouncedValue(q, 300);
 
   const key = swrKeys.templates({
     q: debouncedQ || undefined,
     includeArchived: includeArchived ? "true" : undefined,
+    localeFilter: localeFilter === "all" ? undefined : localeFilter,
     page,
     pageSize,
   });
@@ -67,12 +77,12 @@ export default function TemplatesListPage() {
   });
 
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<TemplateItem | null>(null);
+  const [deleting, setDeleting] = useState<TemplateListItem | null>(null);
 
   const total = data?.total ?? 0;
   const items = data?.data ?? [];
 
-  async function onArchive(t: TemplateItem) {
+  async function onArchive(t: TemplateListItem) {
     setBusyId(t.id);
     try {
       const url = t.isArchived
@@ -92,18 +102,18 @@ export default function TemplatesListPage() {
     }
   }
 
-  async function onDuplicate(t: TemplateItem) {
+  async function onDuplicate(t: TemplateListItem) {
     setBusyId(t.id);
     try {
-      const baseName = t.name.replace(/\s*\(副本(?: \d+)?\)$/u, "");
-      let candidate = `${baseName} (副本)`;
-      for (let i = 2; i < 50; i += 1) {
+      const full = await apiGet<TemplateRecord>(`/api/templates/${t.id}`);
+      const { defaultLocale, locales } = buildDuplicatePayload(full);
+      for (let attempt = 1; attempt < 50; attempt += 1) {
+        const candidate = nextDuplicateName(t.name, attempt);
         try {
           await apiPost("/api/templates", {
             name: candidate,
-            subject: t.subject,
-            htmlContent: t.htmlContent,
-            textContent: t.textContent ?? undefined,
+            defaultLocale,
+            locales,
           });
           toast({ title: "已复制", description: candidate });
           await mutate();
@@ -114,7 +124,6 @@ export default function TemplatesListPage() {
               ? (e as { status?: number }).status
               : undefined;
           if (status !== 409) throw e;
-          candidate = `${baseName} (副本 ${i})`;
         }
       }
       toast({
@@ -151,7 +160,7 @@ export default function TemplatesListPage() {
         </Link>
       </header>
 
-      <div className="grid gap-3 rounded-md border bg-card p-4 sm:grid-cols-3">
+      <div className="grid gap-3 rounded-md border bg-card p-4 sm:grid-cols-4">
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">搜索</label>
           <Input
@@ -163,6 +172,23 @@ export default function TemplatesListPage() {
             }}
             data-testid="templates-search"
           />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">语言</label>
+          <Select
+            value={localeFilter}
+            onChange={(e) => {
+              setLocaleFilter(e.target.value as LocaleFilter);
+              setPage(1);
+            }}
+            data-testid="templates-filter-locale"
+          >
+            {LOCALE_FILTER_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </Select>
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-medium text-muted-foreground">归档</label>
@@ -217,7 +243,7 @@ export default function TemplatesListPage() {
               data-testid={`template-item-${t.id}`}
             >
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Link
                     href={`/templates/${t.id}/edit`}
                     className="truncate font-medium hover:underline"
@@ -229,17 +255,16 @@ export default function TemplatesListPage() {
                   <Badge variant="outline" className="shrink-0 text-[10px]">
                     v{t.version}
                   </Badge>
+                  <LocaleBadges
+                    templateId={t.id}
+                    defaultLocale={t.defaultLocale}
+                    availableLocales={t.availableLocales}
+                  />
                   {t.isArchived ? (
                     <Badge variant="secondary" className="shrink-0 text-[10px]">
                       已归档
                     </Badge>
                   ) : null}
-                </div>
-                <div
-                  className="mt-1 truncate text-xs text-muted-foreground"
-                  title={t.subject}
-                >
-                  {t.subject}
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-1">
                   {t.variables.length === 0 ? (
@@ -350,4 +375,68 @@ export default function TemplatesListPage() {
       />
     </section>
   );
+}
+
+function LocaleBadges({
+  templateId,
+  defaultLocale,
+  availableLocales,
+}: {
+  templateId: string;
+  defaultLocale: Locale;
+  availableLocales: Locale[];
+}) {
+  const ordered = TEMPLATE_LOCALES.filter((locale) =>
+    availableLocales.includes(locale),
+  );
+  if (ordered.length === 0) return null;
+  return (
+    <span
+      className="flex flex-wrap gap-1"
+      data-testid={`template-locales-${templateId}`}
+    >
+      {ordered.map((locale) => {
+        const isDefault = locale === defaultLocale;
+        return (
+          <Badge
+            key={locale}
+            variant={isDefault ? "default" : "outline"}
+            className="shrink-0 text-[10px]"
+            data-testid={`template-locale-badge-${templateId}-${locale}`}
+            data-default={isDefault ? "true" : "false"}
+            title={isDefault ? `${LOCALE_LABELS[locale]}（默认）` : LOCALE_LABELS[locale]}
+          >
+            {locale}
+            {isDefault ? " ★" : ""}
+          </Badge>
+        );
+      })}
+    </span>
+  );
+}
+
+export { LocaleBadges, LOCALE_FILTER_OPTIONS };
+
+export function buildDuplicatePayload(full: TemplateRecord): {
+  defaultLocale: Locale;
+  locales: Record<Locale, { subject: string; htmlContent: string; textContent?: string }>;
+} {
+  const locales: Record<
+    Locale,
+    { subject: string; htmlContent: string; textContent?: string }
+  > = {} as never;
+  for (const row of full.locales) {
+    locales[row.locale] = {
+      subject: row.subject,
+      htmlContent: row.htmlContent,
+      ...(row.textContent ? { textContent: row.textContent } : {}),
+    };
+  }
+  return { defaultLocale: full.defaultLocale, locales };
+}
+
+export function nextDuplicateName(originalName: string, attempt: number): string {
+  const base = originalName.replace(/\s*\(副本(?: \d+)?\)$/u, "");
+  if (attempt <= 1) return `${base} (副本)`;
+  return `${base} (副本 ${attempt})`;
 }

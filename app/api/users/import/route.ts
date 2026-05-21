@@ -6,8 +6,10 @@ import { ForbiddenError, ValidationError } from "@/lib/errors";
 import {
   importUsers,
   parseCsv,
+  parseLocaleCell,
   MAX_IMPORT_BYTES,
   MAX_IMPORT_ROWS,
+  type ImportError,
   type ImportRow,
 } from "@/lib/modules/import/csv";
 
@@ -28,6 +30,7 @@ const JsonImportBody = z.object({
         lastOrderAt: z.string().optional(),
         birthDate: z.string().optional(),
         tags: z.array(z.string()).optional(),
+        locale: z.union([z.string(), z.null()]).optional(),
         subscriptions: z.record(z.string(), z.boolean()).optional(),
       }),
     )
@@ -75,25 +78,50 @@ export const POST = withAuth(async (_session, request: Request) => {
       throw new ValidationError("Invalid JSON body");
     }
     const parsed = JsonImportBody.parse(raw);
-    rows = parsed.users.map((u) => ({
-      email: u.email,
-      externalId: u.externalId,
-      name: u.name,
-      source: u.source,
-      metadata: u.metadata,
-      userLevel: u.userLevel,
-      totalSpend: u.totalSpend,
-      orderCount: u.orderCount,
-      lastOrderAt: u.lastOrderAt,
-      birthDate: u.birthDate,
-      tags: u.tags,
-      subscriptions: u.subscriptions,
-    }));
+    const localeErrors: ImportError[] = [];
+    rows = parsed.users.map((u, idx) => {
+      let locale: "zh" | "en" | null | undefined;
+      if (u.locale === undefined) {
+        locale = undefined;
+      } else if (u.locale === null) {
+        locale = null;
+      } else {
+        const cell = parseLocaleCell(u.locale);
+        if (cell === "invalid") {
+          localeErrors.push({
+            row: idx + 1,
+            email: u.email,
+            reason: `Invalid locale: ${u.locale}（仅支持 zh / en）`,
+          });
+          locale = undefined;
+        } else {
+          locale = cell ?? undefined;
+        }
+      }
+      return {
+        email: u.email,
+        externalId: u.externalId,
+        name: u.name,
+        source: u.source,
+        metadata: u.metadata,
+        userLevel: u.userLevel,
+        totalSpend: u.totalSpend,
+        orderCount: u.orderCount,
+        lastOrderAt: u.lastOrderAt,
+        birthDate: u.birthDate,
+        tags: u.tags,
+        locale,
+        subscriptions: u.subscriptions,
+      };
+    });
     const result = await importUsers(rows, {
       actorType: "ADMIN",
       req: { headers: request.headers },
     });
-    return NextResponse.json(result);
+    return NextResponse.json({
+      ...result,
+      errors: [...localeErrors, ...result.errors],
+    });
   }
 
   throw new ValidationError(

@@ -258,6 +258,15 @@ async function processOnePage(
       }
       continue;
     }
+    for (const warning of result.warnings ?? []) {
+      await importRepository.addJobError({
+        jobId: job.id,
+        row: rowNum,
+        field: warning.field,
+        message: warning.message,
+        rawData: raw === undefined ? undefined : (maskRawData(raw) as Prisma.InputJsonValue),
+      });
+    }
     if (isDryRun) {
       skipped += 1;
       continue;

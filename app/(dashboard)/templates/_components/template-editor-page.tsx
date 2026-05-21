@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -29,19 +30,25 @@ import {
   BUILTIN_VARIABLE_NAMES,
   extractVariables,
 } from "@/lib/template-engine";
+import {
+  LOCALE_LABELS,
+  TEMPLATE_LOCALES,
+  TemplateFormSchema,
+  buildCreatePayload,
+  buildInitialLocales,
+  buildUpdatePayload,
+  classifyVariableUsage,
+  copyLocaleContent,
+  emptyLocaleContent,
+  type Locale,
+  type TemplateFormValues,
+  type TemplateLocaleContent,
+  type TemplateLocaleMap,
+  type TemplateRecord,
+  type VariableUsageEntry,
+} from "./types";
 
-export interface TemplateRecord {
-  id: string;
-  name: string;
-  subject: string;
-  htmlContent: string;
-  textContent: string | null;
-  variables: string[];
-  version: number;
-  isArchived: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+export type { TemplateRecord } from "./types";
 
 interface PreviewResp {
   renderedSubject: string;
@@ -90,26 +97,78 @@ export default function TemplateEditorPage({
   const { toast } = useToast();
 
   const [name, setName] = useState(initial?.name ?? "");
-  const [subject, setSubject] = useState(initial?.subject ?? "");
-  const [htmlContent, setHtmlContent] = useState(initial?.htmlContent ?? "");
-  const [textContent, setTextContent] = useState(initial?.textContent ?? "");
+  const [defaultLocale, setDefaultLocale] = useState<Locale>(
+    initial?.defaultLocale ?? "zh",
+  );
+  const [locales, setLocales] = useState<TemplateLocaleMap>(() =>
+    buildInitialLocales(initial ?? null),
+  );
+  const initialLocaleKeys = TEMPLATE_LOCALES.filter(
+    (locale) => locales[locale] !== undefined,
+  );
+  const [activeLocale, setActiveLocale] = useState<Locale>(
+    initialLocaleKeys[0] ?? "zh",
+  );
   const [editorMode, setEditorMode] = useState<"rich" | "html">("rich");
-  const [showText, setShowText] = useState(Boolean(initial?.textContent));
+  const [showText, setShowText] = useState(() =>
+    Boolean(initial?.locales.some((row) => row.textContent)),
+  );
   const [version, setVersion] = useState(initial?.version ?? 1);
   const [isArchived, setIsArchived] = useState(initial?.isArchived ?? false);
   const [saving, setSaving] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmCopy, setConfirmCopy] = useState<{
+    from: Locale;
+    to: Locale;
+  } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<Locale | null>(null);
   const [testOpen, setTestOpen] = useState(false);
+
+  const [initialRecord, setInitialRecord] = useState<TemplateRecord | null>(
+    initial ?? null,
+  );
+
+  const activeContent = locales[activeLocale];
+
+  const presentLocales = useMemo(
+    () => TEMPLATE_LOCALES.filter((locale) => locales[locale] !== undefined),
+    [locales],
+  );
+  const missingLocales = useMemo(
+    () => TEMPLATE_LOCALES.filter((locale) => locales[locale] === undefined),
+    [locales],
+  );
 
   const detectedVariables = useMemo(() => {
     const set = new Set<string>();
-    for (const v of extractVariables(subject)) set.add(v);
-    for (const v of extractVariables(htmlContent)) set.add(v);
-    for (const v of extractVariables(textContent)) set.add(v);
+    if (activeContent) {
+      for (const v of extractVariables(activeContent.subject)) set.add(v);
+      for (const v of extractVariables(activeContent.htmlContent)) set.add(v);
+      for (const v of extractVariables(activeContent.textContent)) set.add(v);
+    }
     return Array.from(set);
-  }, [subject, htmlContent, textContent]);
+  }, [activeContent]);
+
+  const variablesPerLocale = useMemo(() => {
+    const map: Partial<Record<Locale, string[]>> = {};
+    for (const locale of TEMPLATE_LOCALES) {
+      const c = locales[locale];
+      if (!c) continue;
+      const set = new Set<string>();
+      for (const v of extractVariables(c.subject)) set.add(v);
+      for (const v of extractVariables(c.htmlContent)) set.add(v);
+      for (const v of extractVariables(c.textContent)) set.add(v);
+      map[locale] = Array.from(set);
+    }
+    return map;
+  }, [locales]);
+
+  const variableUsage = useMemo(
+    () => classifyVariableUsage(activeLocale, variablesPerLocale),
+    [activeLocale, variablesPerLocale],
+  );
 
   const customVariables = useMemo(
     () => detectedVariables.filter((v) => !BUILTIN_SET.has(v)),
@@ -119,7 +178,6 @@ export default function TemplateEditorPage({
   const [variableValues, setVariableValues] = useState<Record<string, string>>(
     {},
   );
-
   useEffect(() => {
     setVariableValues((prev) => {
       const next: Record<string, string> = {};
@@ -137,9 +195,9 @@ export default function TemplateEditorPage({
     return merged;
   }, [detectedVariables, variableValues]);
 
-  const debouncedSubject = useDebouncedValue(subject, 300);
-  const debouncedHtml = useDebouncedValue(htmlContent, 300);
-  const debouncedText = useDebouncedValue(textContent, 300);
+  const debouncedSubject = useDebouncedValue(activeContent?.subject ?? "", 300);
+  const debouncedHtml = useDebouncedValue(activeContent?.htmlContent ?? "", 300);
+  const debouncedText = useDebouncedValue(activeContent?.textContent ?? "", 300);
   const debouncedVars = useDebouncedValue(previewVariables, 300);
 
   const [preview, setPreview] = useState<PreviewResp | null>(null);
@@ -156,6 +214,7 @@ export default function TemplateEditorPage({
     void (async () => {
       try {
         const res = await apiPost<PreviewResp>("/api/templates/preview", {
+          locale: activeLocale,
           subject: debouncedSubject,
           htmlContent: debouncedHtml,
           textContent: debouncedText || undefined,
@@ -170,50 +229,124 @@ export default function TemplateEditorPage({
         setPreviewError(asMessage(e));
       }
     })();
-  }, [debouncedSubject, debouncedHtml, debouncedText, debouncedVars]);
+  }, [activeLocale, debouncedSubject, debouncedHtml, debouncedText, debouncedVars]);
+
+  function updateActiveLocale(patch: Partial<TemplateLocaleContent>) {
+    setLocales((prev) => {
+      const current = prev[activeLocale] ?? emptyLocaleContent();
+      return {
+        ...prev,
+        [activeLocale]: { ...current, ...patch },
+      };
+    });
+  }
 
   function switchMode(next: "rich" | "html") {
     if (next === editorMode) return;
     setEditorMode(next);
   }
 
+  function addLocale(locale: Locale) {
+    if (locales[locale]) return;
+    setLocales((prev) => ({ ...prev, [locale]: emptyLocaleContent() }));
+    setActiveLocale(locale);
+  }
+
+  function performCopy(from: Locale, to: Locale) {
+    const source = locales[from];
+    if (!source) return;
+    setLocales((prev) => ({ ...prev, [to]: copyLocaleContent(source) }));
+    setActiveLocale(to);
+    toast({
+      title: "已复制",
+      description: `${LOCALE_LABELS[from]} → ${LOCALE_LABELS[to]}`,
+    });
+  }
+
+  function requestCopyTo(target: Locale) {
+    if (target === activeLocale) return;
+    if (locales[target]) {
+      setConfirmCopy({ from: activeLocale, to: target });
+      return;
+    }
+    performCopy(activeLocale, target);
+  }
+
+  function performRemove(locale: Locale) {
+    if (locale === defaultLocale) {
+      toast({
+        title: "无法删除默认语言",
+        description: "请先切换默认语言",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (presentLocales.length <= 1) {
+      toast({
+        title: "至少需要保留一个语言版本",
+        variant: "destructive",
+      });
+      return;
+    }
+    setLocales((prev) => {
+      const next = { ...prev };
+      delete next[locale];
+      return next;
+    });
+    if (activeLocale === locale) {
+      const fallback = presentLocales.find((l) => l !== locale) ?? defaultLocale;
+      setActiveLocale(fallback);
+    }
+  }
+
+  function buildFormValues(): TemplateFormValues {
+    return {
+      name,
+      defaultLocale,
+      locales: locales as TemplateFormValues["locales"],
+    };
+  }
+
   async function onSave(): Promise<void> {
-    if (!name.trim()) {
-      toast({ title: "请填写模板名称", variant: "destructive" });
-      return;
-    }
-    if (!subject.trim()) {
-      toast({ title: "请填写主题", variant: "destructive" });
-      return;
-    }
-    if (!htmlContent.trim()) {
-      toast({ title: "请填写 HTML 内容", variant: "destructive" });
+    const parsed = TemplateFormSchema.safeParse(buildFormValues());
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      toast({
+        title: "请检查表单",
+        description: first?.message ?? "存在未填写字段",
+        variant: "destructive",
+      });
       return;
     }
     setSaving(true);
     try {
       if (mode === "create") {
-        const created = await apiPost<TemplateRecord>("/api/templates", {
-          name: name.trim(),
-          subject: subject.trim(),
-          htmlContent,
-          textContent: textContent.trim() ? textContent : undefined,
-        });
+        const payload = buildCreatePayload(parsed.data);
+        const created = await apiPost<TemplateRecord>("/api/templates", payload);
         toast({ title: "已创建" });
         router.push(`/templates/${created.id}/edit`);
-      } else if (initial) {
-        const updated = await apiPatch<TemplateRecord>(
-          `/api/templates/${initial.id}`,
-          {
-            name: name.trim(),
-            subject: subject.trim(),
-            htmlContent,
-            textContent: textContent.trim() ? textContent : null,
-          },
+      } else if (initialRecord) {
+        const { payload, removedLocales } = buildUpdatePayload(
+          initialRecord,
+          parsed.data,
         );
-        setVersion(updated.version);
-        setIsArchived(updated.isArchived);
-        toast({ title: "已保存", description: `v${updated.version}` });
+
+        let latest: TemplateRecord = initialRecord;
+        if (Object.keys(payload).length > 0) {
+          latest = await apiPatch<TemplateRecord>(
+            `/api/templates/${initialRecord.id}`,
+            payload,
+          );
+        }
+        for (const locale of removedLocales) {
+          latest = await apiDelete<TemplateRecord>(
+            `/api/templates/${initialRecord.id}/locales/${locale}`,
+          );
+        }
+        setVersion(latest.version);
+        setIsArchived(latest.isArchived);
+        setInitialRecord(latest);
+        toast({ title: "已保存", description: `v${latest.version}` });
       }
     } catch (e) {
       const status = statusOf(e);
@@ -228,14 +361,15 @@ export default function TemplateEditorPage({
   }
 
   async function onToggleArchive(): Promise<void> {
-    if (!initial) return;
+    if (!initialRecord) return;
     setArchiving(true);
     try {
       const url = isArchived
-        ? `/api/templates/${initial.id}/unarchive`
-        : `/api/templates/${initial.id}/archive`;
+        ? `/api/templates/${initialRecord.id}/unarchive`
+        : `/api/templates/${initialRecord.id}/archive`;
       const tpl = await apiPost<TemplateRecord>(url);
       setIsArchived(tpl.isArchived);
+      setInitialRecord(tpl);
       toast({ title: isArchived ? "已取消归档" : "已归档" });
     } catch (e) {
       toast({
@@ -249,10 +383,10 @@ export default function TemplateEditorPage({
   }
 
   async function onDelete(): Promise<void> {
-    if (!initial) return;
+    if (!initialRecord) return;
     setDeleting(true);
     try {
-      await apiDelete(`/api/templates/${initial.id}`);
+      await apiDelete(`/api/templates/${initialRecord.id}`);
       toast({ title: "已删除" });
       router.push("/templates");
     } catch (e) {
@@ -299,7 +433,7 @@ export default function TemplateEditorPage({
           </Link>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {mode === "edit" && initial ? (
+          {mode === "edit" && initialRecord ? (
             <>
               <Button
                 type="button"
@@ -343,121 +477,191 @@ export default function TemplateEditorPage({
       <div className="grid gap-4 lg:grid-cols-2">
         {/* 左栏：编辑区 */}
         <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="template-name">名称</Label>
-            <Input
-              id="template-name"
-              value={name}
-              maxLength={128}
-              onChange={(e) => setName(e.target.value)}
-              data-testid="template-name"
-              placeholder="欢迎邮件"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="template-subject">
-              主题（支持 {`{{variable}}`}）
-            </Label>
-            <Input
-              id="template-subject"
-              value={subject}
-              maxLength={512}
-              onChange={(e) => setSubject(e.target.value)}
-              data-testid="template-subject"
-              placeholder="欢迎 {{user_name}}！"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>正文 HTML</Label>
-              <div className="inline-flex rounded-md border p-0.5 text-xs">
-                <button
-                  type="button"
-                  className={`rounded px-2 py-1 ${editorMode === "rich"
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground"
-                    }`}
-                  onClick={() => switchMode("rich")}
-                  data-testid="template-mode-rich"
-                >
-                  富文本
-                </button>
-                <button
-                  type="button"
-                  className={`rounded px-2 py-1 ${editorMode === "html"
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground"
-                    }`}
-                  onClick={() => switchMode("html")}
-                  data-testid="template-mode-html"
-                >
-                  HTML
-                </button>
-              </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="template-name">名称</Label>
+              <Input
+                id="template-name"
+                value={name}
+                maxLength={128}
+                onChange={(e) => setName(e.target.value)}
+                data-testid="template-name"
+                placeholder="欢迎邮件"
+              />
             </div>
-            {editorMode === "rich" ? (
-              <RichTextEditor
-                value={htmlContent}
-                onChange={setHtmlContent}
-                testId="template-rich-editor"
-              />
-            ) : (
-              <Textarea
-                value={htmlContent}
-                onChange={(e) => setHtmlContent(e.target.value)}
-                rows={16}
-                className="font-mono text-xs"
-                data-testid="template-html-textarea"
-                spellCheck={false}
-              />
-            )}
-            <p className="text-[11px] text-muted-foreground">
-              {new Blob([htmlContent]).size.toLocaleString()} bytes / 1 MB 限制
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>纯文本版本（可选）</Label>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowText((v) => !v)}
-                data-testid="template-text-toggle"
+            <div className="space-y-2">
+              <Label htmlFor="template-default-locale">默认语言</Label>
+              <Select
+                id="template-default-locale"
+                value={defaultLocale}
+                onChange={(e) => {
+                  const next = e.target.value as Locale;
+                  if (!locales[next]) {
+                    addLocale(next);
+                  }
+                  setDefaultLocale(next);
+                }}
+                data-testid="template-default-locale"
               >
-                {showText ? "收起" : "展开"}
-              </Button>
+                {TEMPLATE_LOCALES.map((locale) => (
+                  <option key={locale} value={locale}>
+                    {LOCALE_LABELS[locale]}
+                  </option>
+                ))}
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                收件人语言缺失时回退到此语言。
+              </p>
             </div>
-            {showText ? (
-              <Textarea
-                value={textContent}
-                onChange={(e) => setTextContent(e.target.value)}
-                rows={6}
-                className="font-mono text-xs"
-                data-testid="template-text-textarea"
-                spellCheck={false}
-                placeholder="为不支持 HTML 的客户端提供降级版本"
-              />
-            ) : null}
           </div>
 
-          <VariablePanel
-            detected={detectedVariables}
-            customVariables={customVariables}
-            values={variableValues}
-            onValueChange={(name, value) =>
-              setVariableValues((prev) => ({ ...prev, [name]: value }))
-            }
+          <LocaleTabBar
+            present={presentLocales}
+            missing={missingLocales}
+            active={activeLocale}
+            defaultLocale={defaultLocale}
+            onSwitch={setActiveLocale}
+            onAdd={addLocale}
+            onRequestRemove={(locale) => setConfirmRemove(locale)}
           />
+
+          {activeContent ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="template-subject">
+                  主题（支持 {`{{variable}}`}）
+                </Label>
+                <Input
+                  id="template-subject"
+                  value={activeContent.subject}
+                  maxLength={512}
+                  onChange={(e) => updateActiveLocale({ subject: e.target.value })}
+                  data-testid={`template-subject-${activeLocale}`}
+                  placeholder="欢迎 {{user_name}}！"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>正文 HTML</Label>
+                  <div className="flex items-center gap-2">
+                    {presentLocales
+                      .filter((l) => l !== activeLocale)
+                      .map((target) => (
+                        <Button
+                          key={target}
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => requestCopyTo(target)}
+                          data-testid={`template-copy-to-${target}`}
+                        >
+                          复制到 {LOCALE_LABELS[target]}
+                        </Button>
+                      ))}
+                    <div className="inline-flex rounded-md border p-0.5 text-xs">
+                      <button
+                        type="button"
+                        className={`rounded px-2 py-1 ${editorMode === "rich"
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground"
+                          }`}
+                        onClick={() => switchMode("rich")}
+                        data-testid="template-mode-rich"
+                      >
+                        富文本
+                      </button>
+                      <button
+                        type="button"
+                        className={`rounded px-2 py-1 ${editorMode === "html"
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground"
+                          }`}
+                        onClick={() => switchMode("html")}
+                        data-testid="template-mode-html"
+                      >
+                        HTML
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {editorMode === "rich" ? (
+                  <RichTextEditor
+                    key={activeLocale}
+                    value={activeContent.htmlContent}
+                    onChange={(value) => updateActiveLocale({ htmlContent: value })}
+                    testId={`template-rich-editor-${activeLocale}`}
+                  />
+                ) : (
+                  <Textarea
+                    value={activeContent.htmlContent}
+                    onChange={(e) =>
+                      updateActiveLocale({ htmlContent: e.target.value })
+                    }
+                    rows={16}
+                    className="font-mono text-xs"
+                    data-testid={`template-html-textarea-${activeLocale}`}
+                    spellCheck={false}
+                  />
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  {new Blob([activeContent.htmlContent]).size.toLocaleString()} bytes / 1 MB 限制
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label>纯文本版本（可选）</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowText((v) => !v)}
+                    data-testid="template-text-toggle"
+                  >
+                    {showText ? "收起" : "展开"}
+                  </Button>
+                </div>
+                {showText ? (
+                  <Textarea
+                    value={activeContent.textContent}
+                    onChange={(e) =>
+                      updateActiveLocale({ textContent: e.target.value })
+                    }
+                    rows={6}
+                    className="font-mono text-xs"
+                    data-testid={`template-text-textarea-${activeLocale}`}
+                    spellCheck={false}
+                    placeholder="为不支持 HTML 的客户端提供降级版本"
+                  />
+                ) : null}
+              </div>
+
+              <VariablePanel
+                detected={detectedVariables}
+                usage={variableUsage}
+                customVariables={customVariables}
+                values={variableValues}
+                onValueChange={(name, value) =>
+                  setVariableValues((prev) => ({ ...prev, [name]: value }))
+                }
+              />
+            </>
+          ) : (
+            <div
+              className="rounded-md border border-dashed bg-muted/30 px-4 py-12 text-center text-sm text-muted-foreground"
+              data-testid="template-locale-empty"
+            >
+              请添加一个语言版本以开始编辑。
+            </div>
+          )}
         </div>
 
         {/* 右栏：预览 */}
         <div className="space-y-3">
           <div className="rounded-md border bg-card">
-            <div className="border-b px-3 py-2 text-xs text-muted-foreground">
-              主题预览
+            <div className="flex items-center justify-between border-b px-3 py-2 text-xs text-muted-foreground">
+              <span>主题预览（{LOCALE_LABELS[activeLocale]}）</span>
             </div>
             <div
               className="px-3 py-2 text-sm font-medium"
@@ -504,10 +708,11 @@ export default function TemplateEditorPage({
         </div>
       </div>
 
-      {mode === "edit" && initial ? (
+      {mode === "edit" && initialRecord ? (
         <TestSendDialog
           open={testOpen}
-          template={initial}
+          template={initialRecord}
+          locale={activeLocale}
           variables={previewVariables}
           onClose={() => setTestOpen(false)}
         />
@@ -517,8 +722,8 @@ export default function TemplateEditorPage({
         open={confirmDelete}
         title="删除模板"
         description={
-          initial
-            ? `确认删除「${initial.name}」？被活动引用的模板无法删除。`
+          initialRecord
+            ? `确认删除「${initialRecord.name}」？被活动引用的模板无法删除。`
             : ""
         }
         confirmLabel="删除"
@@ -529,7 +734,125 @@ export default function TemplateEditorPage({
         }}
         onConfirm={onDelete}
       />
-    </section >
+
+      <ConfirmDialog
+        open={confirmCopy !== null}
+        title="覆盖现有内容"
+        description={
+          confirmCopy
+            ? `将使用「${LOCALE_LABELS[confirmCopy.from]}」的主题、HTML 和纯文本覆盖「${LOCALE_LABELS[confirmCopy.to]}」当前内容，原文不会自动翻译。`
+            : ""
+        }
+        confirmLabel="覆盖"
+        destructive
+        onOpenChange={(o) => {
+          if (!o) setConfirmCopy(null);
+        }}
+        onConfirm={async () => {
+          if (confirmCopy) {
+            performCopy(confirmCopy.from, confirmCopy.to);
+          }
+          setConfirmCopy(null);
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmRemove !== null}
+        title="移除语言版本"
+        description={
+          confirmRemove
+            ? `保存后会从模板中移除「${LOCALE_LABELS[confirmRemove]}」版本。`
+            : ""
+        }
+        confirmLabel="移除"
+        destructive
+        onOpenChange={(o) => {
+          if (!o) setConfirmRemove(null);
+        }}
+        onConfirm={async () => {
+          if (confirmRemove) {
+            performRemove(confirmRemove);
+          }
+          setConfirmRemove(null);
+        }}
+      />
+    </section>
+  );
+}
+
+function LocaleTabBar({
+  present,
+  missing,
+  active,
+  defaultLocale,
+  onSwitch,
+  onAdd,
+  onRequestRemove,
+}: {
+  present: Locale[];
+  missing: Locale[];
+  active: Locale;
+  defaultLocale: Locale;
+  onSwitch: (locale: Locale) => void;
+  onAdd: (locale: Locale) => void;
+  onRequestRemove: (locale: Locale) => void;
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-2 py-1.5"
+      role="tablist"
+      data-testid="template-locale-tabs"
+    >
+      {present.map((locale) => {
+        const isActive = locale === active;
+        const isDefault = locale === defaultLocale;
+        const canRemove = !isDefault && present.length > 1;
+        return (
+          <div
+            key={locale}
+            className={`flex items-center gap-1 rounded-md border px-2 py-1 text-xs ${isActive
+              ? "border-primary bg-primary/10 text-primary"
+              : "border-transparent text-muted-foreground hover:border-input"
+              }`}
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => onSwitch(locale)}
+              data-testid={`template-locale-tab-${locale}`}
+            >
+              {LOCALE_LABELS[locale]}
+              {isDefault ? <span className="ml-1 text-[10px]">（默认）</span> : null}
+            </button>
+            {canRemove ? (
+              <button
+                type="button"
+                aria-label={`移除 ${LOCALE_LABELS[locale]}`}
+                className="rounded hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => onRequestRemove(locale)}
+                data-testid={`template-locale-remove-${locale}`}
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+      {missing.map((locale) => (
+        <Button
+          key={locale}
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-xs"
+          onClick={() => onAdd(locale)}
+          data-testid={`template-locale-add-${locale}`}
+        >
+          + {LOCALE_LABELS[locale]}
+        </Button>
+      ))}
+    </div>
   );
 }
 
@@ -553,38 +876,87 @@ function buildPreviewDoc(html: string): string {
 
 function VariablePanel({
   detected,
+  usage,
   customVariables,
   values,
   onValueChange,
 }: {
   detected: string[];
+  usage: VariableUsageEntry[];
   customVariables: string[];
   values: Record<string, string>;
   onValueChange: (name: string, value: string) => void;
 }) {
   const builtinUsed = detected.filter((v) => BUILTIN_SET.has(v));
+  const sharedEntries = usage.filter((u) => u.status === "shared");
+  const currentOnlyEntries = usage.filter((u) => u.status === "current-only");
+  const missingEntries = usage.filter(
+    (u) => u.status === "missing-in-current",
+  );
 
   return (
     <div className="space-y-3 rounded-md border bg-card p-4">
       <div>
         <Label className="text-xs">检测到的变量</Label>
         <div
-          className="mt-2 flex flex-wrap gap-1"
+          className="mt-2 space-y-2"
           data-testid="template-detected-variables"
         >
-          {detected.length === 0 ? (
+          {usage.length === 0 ? (
             <span className="text-xs text-muted-foreground">未检测到变量</span>
           ) : (
-            detected.map((v) => (
-              <Badge
-                key={v}
-                variant={BUILTIN_SET.has(v) ? "secondary" : "outline"}
-                className="text-[10px]"
-              >
-                {`{{${v}}}`}
-                {BUILTIN_SET.has(v) ? "（内置）" : ""}
-              </Badge>
-            ))
+            <>
+              {sharedEntries.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-muted-foreground">共享：</span>
+                  {sharedEntries.map((u) => (
+                    <Badge
+                      key={u.name}
+                      variant={BUILTIN_SET.has(u.name) ? "secondary" : "outline"}
+                      className="text-[10px]"
+                      data-testid={`template-variable-shared-${u.name}`}
+                    >
+                      {`{{${u.name}}}`}
+                      {BUILTIN_SET.has(u.name) ? "（内置）" : ""}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+              {currentOnlyEntries.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-muted-foreground">仅当前语言：</span>
+                  {currentOnlyEntries.map((u) => (
+                    <Badge
+                      key={u.name}
+                      variant={BUILTIN_SET.has(u.name) ? "secondary" : "outline"}
+                      className="text-[10px]"
+                      data-testid={`template-variable-current-only-${u.name}`}
+                    >
+                      {`{{${u.name}}}`}
+                      {BUILTIN_SET.has(u.name) ? "（内置）" : ""}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+              {missingEntries.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-amber-600">
+                    在其它语言出现但当前语言缺失：
+                  </span>
+                  {missingEntries.map((u) => (
+                    <Badge
+                      key={u.name}
+                      variant="outline"
+                      className="border-amber-400 bg-amber-50 text-[10px] text-amber-700"
+                      data-testid={`template-variable-missing-${u.name}`}
+                      title={`已在 ${u.presentLocales.map((l) => LOCALE_LABELS[l]).join(" / ")} 中出现`}
+                    >
+                      {`{{${u.name}}}`}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
       </div>
@@ -618,11 +990,13 @@ function VariablePanel({
 function TestSendDialog({
   open,
   template,
+  locale,
   variables,
   onClose,
 }: {
   open: boolean;
   template: TemplateRecord;
+  locale: Locale;
   variables: Record<string, string>;
   onClose: () => void;
 }) {
@@ -646,9 +1020,13 @@ function TestSendDialog({
     try {
       await apiPost(`/api/templates/${template.id}/test-send`, {
         to: to.trim(),
+        locale,
         variables,
       });
-      toast({ title: "已发送", description: to.trim() });
+      toast({
+        title: "已发送",
+        description: `${to.trim()}（${LOCALE_LABELS[locale]}）`,
+      });
       onClose();
     } catch (e) {
       toast({
@@ -672,7 +1050,7 @@ function TestSendDialog({
         <DialogHeader>
           <DialogTitle>测试发送</DialogTitle>
           <DialogDescription>
-            收件人必须配置在 <code>ADMIN_TEST_EMAILS</code> 白名单中。当前预览所用变量值会一同发送。
+            收件人必须配置在 <code>ADMIN_TEST_EMAILS</code> 白名单中。当前预览所用变量值会按 {LOCALE_LABELS[locale]} 版本一同发送。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">

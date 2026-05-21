@@ -18,13 +18,19 @@
  *  - retry：仅 FAILED → SENDING。
  */
 
-import { Prisma, type Campaign, type CampaignStatus } from "@prisma/client";
+import { Prisma, type Campaign, type CampaignStatus, type Locale } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { audit } from "@/lib/audit";
 import { env } from "@/lib/env";
 import { isValidFromHeader } from "@/lib/email-utils";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
 import { templateService } from "@/lib/modules/template/service";
+import { buildTemplateSnapshot } from "@/lib/modules/template/snapshot";
+import { compileSegmentCondition } from "@/lib/modules/segment/compiler";
+import {
+  computeLocaleCoverage,
+  type LocaleCoverageResult,
+} from "./locale-coverage";
 import { campaignRepository, type ListCampaignsResult } from "./repository";
 import {
   assertTransition,
@@ -44,18 +50,68 @@ interface ActorContext {
   req?: { headers: Headers } | null;
 }
 
-function buildTemplateSnapshot(tpl: {
-  subject: string;
-  htmlContent: string;
-  textContent: string | null;
-  version: number;
-}): Prisma.JsonObject {
-  return {
-    subject: tpl.subject,
-    htmlContent: tpl.htmlContent,
-    textContent: tpl.textContent ?? null,
-    version: tpl.version,
-  };
+/**
+ * 规整 Campaign.subjects 覆盖 JSON。语义：
+ *  - 输入对象**整体替换**已有 subjects（非按 locale 合并）；UI 表单始终带全部 locale
+ *    字段，PATCH 含义即"当前可见状态"，所以替换是契合 UI 的最简语义。
+ *  - 空字符串视为未覆盖（spec §492），trim 后去掉该 key。
+ *  - 全部 key 都被剔除时写 SQL NULL（清除所有 override）。
+ *  - 模板未配置的 locale 直接拒绝（spec §491）。
+ */
+function cleanSubjectOverrides(
+  subjects: Partial<Record<Locale, string>> | undefined,
+  availableLocales: Set<Locale>,
+): Prisma.InputJsonValue | typeof Prisma.DbNull {
+  if (!subjects) return Prisma.DbNull;
+  const out: Partial<Record<Locale, string>> = {};
+  for (const [locale, value] of Object.entries(subjects) as Array<[Locale, string]>) {
+    if (!availableLocales.has(locale)) {
+      throw new ValidationError(`Subject override locale ${locale} is not available`);
+    }
+    const trimmed = value.trim();
+    if (trimmed) out[locale] = trimmed;
+  }
+  return Object.keys(out).length > 0 ? out : Prisma.DbNull;
+}
+
+interface VariantLocaleShape {
+  subjects: Partial<Record<Locale, string>>;
+  htmlContents: Partial<Record<Locale, string>>;
+}
+
+/**
+ * spec §237-§239：variant 可用 locale 必须是模板 locale 的子集，且必须包含模板的
+ * defaultLocale，否则收件人 resolvedLocale 为该 defaultLocale 时会绕过 variant
+ * 直接 fall back 主模板，导致 variant 实际无人接收。
+ */
+function assertVariantLocales(
+  variantName: string,
+  variant: VariantLocaleShape,
+  availableLocales: Set<Locale>,
+  defaultLocale: Locale,
+): void {
+  const presentLocales = new Set(
+    (Object.keys(variant.htmlContents) as Locale[]).filter(
+      (k) => variant.htmlContents[k] !== undefined,
+    ),
+  );
+  if (presentLocales.size === 0) {
+    throw new ValidationError(
+      `Variant ${variantName} must declare at least one locale`,
+    );
+  }
+  for (const locale of presentLocales) {
+    if (!availableLocales.has(locale)) {
+      throw new ValidationError(
+        `Variant ${variantName} locale ${locale} is not present in template`,
+      );
+    }
+  }
+  if (!presentLocales.has(defaultLocale)) {
+    throw new ValidationError(
+      `Variant ${variantName} must include template default locale ${defaultLocale}`,
+    );
+  }
 }
 
 export const campaignService = {
@@ -72,6 +128,13 @@ export const campaignService = {
   async create(input: CreateCampaignInput, ctx: ActorContext): Promise<Campaign> {
     const tpl = await templateService.getById(input.templateId);
     templateService.assertUsableForNewCampaign(tpl);
+    const availableLocales = new Set(tpl.locales.map((locale) => locale.locale));
+    if (
+      input.localeStrategy === "FORCE" &&
+      (!input.forcedLocale || !availableLocales.has(input.forcedLocale))
+    ) {
+      throw new ValidationError("forcedLocale content is missing from template");
+    }
 
     const fromEmail = input.fromEmail ?? env().EMAIL_FROM;
     if (!fromEmail) {
@@ -90,15 +153,25 @@ export const campaignService = {
       if (totalSample > 50) {
         throw new ValidationError("Sum of variant samplePercentage must be <= 50");
       }
+      for (const variant of input.variants) {
+        assertVariantLocales(
+          variant.variantName,
+          variant,
+          availableLocales,
+          tpl.defaultLocale as Locale,
+        );
+      }
     }
 
     const data: Prisma.CampaignUncheckedCreateInput = {
       name: input.name,
-      subject: input.subject ?? tpl.subject,
+      subjects: cleanSubjectOverrides(input.subjects, availableLocales),
+      localeStrategy: input.localeStrategy,
+      forcedLocale: input.forcedLocale ?? null,
       fromEmail,
       replyTo: input.replyTo ?? null,
       templateId: tpl.id,
-      templateSnapshot: buildTemplateSnapshot(tpl),
+      templateSnapshot: buildTemplateSnapshot(tpl) as unknown as Prisma.InputJsonValue,
       segmentId: input.segmentId ?? null,
       tagFilter: input.tagFilter ?? [],
       tagFilterMode: input.tagFilterMode ?? "ANY",
@@ -116,8 +189,9 @@ export const campaignService = {
           data: input.variants.map((v) => ({
             campaignId: campaign.id,
             variantName: v.variantName,
-            subject: v.subject,
-            htmlContent: v.htmlContent,
+            subjects: v.subjects as Prisma.InputJsonValue,
+            htmlContents: v.htmlContents as Prisma.InputJsonValue,
+            textContents: v.textContents ? (v.textContents as Prisma.InputJsonValue) : Prisma.DbNull,
             samplePercentage: v.samplePercentage,
             status: "PENDING",
           })),
@@ -149,10 +223,25 @@ export const campaignService = {
         `Campaign cannot be edited in status ${existing.status}`,
       );
     }
+    const tpl = await templateService.getById(existing.templateId);
+    const availableLocales = new Set(tpl.locales.map((locale) => locale.locale));
+    const nextLocaleStrategy = input.localeStrategy ?? existing.localeStrategy;
+    const nextForcedLocale =
+      input.forcedLocale === undefined ? existing.forcedLocale : input.forcedLocale;
+    if (
+      nextLocaleStrategy === "FORCE" &&
+      (!nextForcedLocale || !availableLocales.has(nextForcedLocale))
+    ) {
+      throw new ValidationError("forcedLocale content is missing from template");
+    }
 
     const data: Prisma.CampaignUncheckedUpdateInput = {};
     if (input.name !== undefined) data.name = input.name;
-    if (input.subject !== undefined) data.subject = input.subject;
+    if (input.subjects !== undefined) {
+      data.subjects = cleanSubjectOverrides(input.subjects, availableLocales);
+    }
+    if (input.localeStrategy !== undefined) data.localeStrategy = input.localeStrategy;
+    if (input.forcedLocale !== undefined) data.forcedLocale = input.forcedLocale ?? null;
     if (input.fromEmail !== undefined) data.fromEmail = input.fromEmail;
     if (input.replyTo !== undefined) data.replyTo = input.replyTo ?? null;
     if (input.tagFilter !== undefined) data.tagFilter = input.tagFilter;
@@ -327,6 +416,80 @@ export const campaignService = {
 
   async retry(id: string, ctx: ActorContext): Promise<Campaign> {
     return this._transition(id, "FAILED", "SENDING", "retry", {}, ctx);
+  },
+
+  async getLocaleCoverage(id: string): Promise<LocaleCoverageResult> {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id },
+      include: { segment: true, variants: true },
+    });
+    if (!campaign) throw new NotFoundError("Campaign not found");
+
+    const snapshot = campaign.templateSnapshot as unknown as {
+      defaultLocale: Locale;
+      locales: Partial<Record<Locale, unknown>>;
+    };
+    const availableLocales = Object.keys(snapshot.locales) as Locale[];
+    const where: Prisma.UserWhereInput = {
+      unsubscribed: false,
+      totalBounceCount: { lt: 3 },
+    };
+    const andClauses: Prisma.UserWhereInput[] = [];
+    if (campaign.tagFilter.length > 0) {
+      if (campaign.tagFilterMode === "ALL") {
+        for (const tagName of campaign.tagFilter) {
+          andClauses.push({ userTags: { some: { tag: { name: tagName } } } });
+        }
+      } else {
+        andClauses.push({
+          userTags: { some: { tag: { name: { in: campaign.tagFilter } } } },
+        });
+      }
+    }
+    if (campaign.segment) {
+      const segmentWhere = compileSegmentCondition(
+        campaign.segment.conditions as Parameters<typeof compileSegmentCondition>[0],
+      );
+      if (Object.keys(segmentWhere).length > 0) andClauses.push(segmentWhere);
+    }
+    if (campaign.subscriptionCategory) {
+      // 与 snapshotRecipients 保持同一套 SQL 粗筛口径（spec §484-§489 "Pre-send
+      // 检查 = 预估"）：把分类粗筛纳入估算，避免对带分类的活动严重高估。
+      const category = await prisma.subscriptionCategory.findUnique({
+        where: { slug: campaign.subscriptionCategory },
+        select: { id: true, isDefault: true },
+      });
+      if (category) {
+        andClauses.push({
+          OR: [
+            { subscriptions: { some: { categoryId: category.id, subscribed: true } } },
+            ...(category.isDefault
+              ? [{ subscriptions: { none: { categoryId: category.id } } }]
+              : []),
+          ],
+        });
+      }
+    }
+    if (campaign.topicId) {
+      andClauses.push({ topicUnsubscribes: { none: { topicId: campaign.topicId } } });
+    }
+    if (andClauses.length > 0) where.AND = andClauses;
+
+    // 注意：本方法是发送前的"预估"，未包含 isSuppressed / isOverLimit 等单点动
+    // 态因子（spec §484-§489），实际 snapshotRecipients 后的人数会略少于此值。
+    const users = await prisma.user.findMany({ where, select: { locale: true } });
+    return computeLocaleCoverage({
+      localeStrategy: campaign.localeStrategy,
+      forcedLocale: campaign.forcedLocale,
+      defaultLocale: snapshot.defaultLocale,
+      availableLocales,
+      users,
+      variants: campaign.variants.map((variant) => ({
+        htmlLocales: Object.keys(
+          (variant.htmlContents ?? {}) as Record<string, unknown>,
+        ) as Locale[],
+      })),
+    });
   },
 };
 

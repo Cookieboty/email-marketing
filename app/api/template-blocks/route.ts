@@ -15,6 +15,7 @@ export const GET = withAuth(async (_session, request: Request) => {
   const parsed = ListTemplateBlocksQuerySchema.parse({
     q: url.searchParams.get("q") ?? undefined,
     category: url.searchParams.get("category") ?? undefined,
+    locale: url.searchParams.get("locale") ?? undefined,
     page: url.searchParams.get("page") ?? undefined,
     pageSize: url.searchParams.get("pageSize") ?? undefined,
   });

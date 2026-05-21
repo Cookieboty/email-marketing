@@ -27,6 +27,8 @@ const isoDateSchema = z
   .union([z.string().datetime({ offset: true }), z.date()])
   .transform((v) => (v instanceof Date ? v : new Date(v)))
   .refine((d) => !Number.isNaN(d.getTime()), { message: "invalid date" });
+const LocaleSchema = z.enum(["zh", "en"]);
+const nullableLocaleSchema = z.union([LocaleSchema, z.null()]).optional();
 
 export const CreateUserSchema = z.object({
   email: z.string().email().max(255),
@@ -45,6 +47,7 @@ export const CreateUserSchema = z.object({
   orderCount: z.number().int().nonnegative().optional(),
   lastOrderAt: isoDateSchema.optional(),
   birthDate: isoDateSchema.optional(),
+  locale: LocaleSchema.optional(),
   tagIds: z.array(z.string().min(1)).optional(),
   tagNames: z.array(z.string().min(1).max(64)).optional(),
 });
@@ -67,6 +70,7 @@ export const UpdateUserSchema = z
     orderCount: z.number().int().nonnegative().optional(),
     lastOrderAt: isoDateSchema.optional(),
     birthDate: isoDateSchema.optional(),
+    locale: nullableLocaleSchema,
   })
   .strict();
 

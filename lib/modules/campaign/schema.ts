@@ -15,6 +15,50 @@ import { isValidFromHeader } from "@/lib/email-utils";
 
 const NameSchema = z.string().trim().min(1).max(120);
 const SubjectSchema = z.string().trim().min(1).max(255);
+const SubjectOverrideSchema = z.string().trim().max(255);
+const LocaleSchema = z.enum(["zh", "en"]);
+const LocaleTextMapSchema = z
+  .object({
+    zh: SubjectSchema.optional(),
+    en: SubjectSchema.optional(),
+  })
+  .strict()
+  .refine((v) => v.zh !== undefined || v.en !== undefined, {
+    message: "at least one locale is required",
+  });
+const LocaleSubjectOverrideMapSchema = z
+  .object({
+    zh: SubjectOverrideSchema.optional(),
+    en: SubjectOverrideSchema.optional(),
+  })
+  .strict()
+  .refine((v) => v.zh !== undefined || v.en !== undefined, {
+    message: "at least one locale is required",
+  });
+/**
+ * Variant html 上限 100KB（与 EmailTemplateLocale 的 1MB 上限刻意不同）：
+ * A/B variant 的实际用法是"在主模板基础上换主题 / 改一小段 html / 改 CTA"，
+ * 而非整体替换大模板。100KB 已经覆盖 99% 场景，更小的上限能：
+ *  - 防止误用（运营把整封新邮件塞进 variant，丢失"对照实验"语义）
+ *  - 让发送高峰期的内存占用更可预期（variant 内容会随 Campaign 全量加载）
+ * 如果未来出现大 variant 的合理场景，再单独调整这里。
+ */
+const LocaleHtmlMapSchema = z
+  .object({
+    zh: z.string().min(1).max(100_000).optional(),
+    en: z.string().min(1).max(100_000).optional(),
+  })
+  .strict()
+  .refine((v) => v.zh !== undefined || v.en !== undefined, {
+    message: "at least one locale is required",
+  });
+const LocaleNullableTextMapSchema = z
+  .object({
+    zh: z.union([z.string().max(100_000), z.null()]).optional(),
+    en: z.union([z.string().max(100_000), z.null()]).optional(),
+  })
+  .strict()
+  .optional();
 /**
  * From 头：允许裸地址（news@example.com）或 RFC 5322 Display Name 格式
  * （`Marketing <news@example.com>`），内部地址必须合法。
@@ -67,18 +111,59 @@ const AbTestConfigSchema = z
  *    再校验「总和 ≤ 50」（其余空间留给最终大众发送）。
  *  - htmlContent：与模板一致，最长 100KB（与模板 schema 对齐）。
  */
-const VariantInputSchema = z.object({
-  variantName: z.string().trim().min(1).max(80),
-  subject: SubjectSchema,
-  htmlContent: z.string().min(1).max(100_000),
-  samplePercentage: z.coerce.number().int().min(1).max(50).default(10),
-});
+const VariantInputSchema = z
+  .object({
+    variantName: z.string().trim().min(1).max(80),
+    subjects: LocaleTextMapSchema,
+    htmlContents: LocaleHtmlMapSchema,
+    textContents: LocaleNullableTextMapSchema,
+    samplePercentage: z.coerce.number().int().min(1).max(50).default(10),
+  })
+  .superRefine((v, ctx) => {
+    // spec §237: variant 的 subjects / htmlContents 必须严格 key 对齐，避免
+    // "有 html 没 subject"导致 selectVariantContent 退化为空 subject 邮件。
+    const subjectKeys = Object.keys(v.subjects).filter(
+      (k) => v.subjects[k as "zh" | "en"] !== undefined,
+    );
+    const htmlKeys = Object.keys(v.htmlContents).filter(
+      (k) => v.htmlContents[k as "zh" | "en"] !== undefined,
+    );
+    const subjectSet = new Set(subjectKeys);
+    const htmlSet = new Set(htmlKeys);
+    if (
+      subjectSet.size !== htmlSet.size ||
+      [...subjectSet].some((k) => !htmlSet.has(k))
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["htmlContents"],
+        message:
+          "variant subjects and htmlContents must declare the same locale keys",
+      });
+    }
+    if (v.textContents) {
+      for (const k of Object.keys(v.textContents)) {
+        const value = v.textContents[k as "zh" | "en"];
+        if (value === undefined) continue;
+        if (!htmlSet.has(k)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["textContents", k],
+            message:
+              "variant textContents locale must also exist in htmlContents",
+          });
+        }
+      }
+    }
+  });
 
 export const CreateCampaignSchema = z
   .object({
     name: NameSchema,
     templateId: z.string().min(1),
-    subject: SubjectSchema.optional(),
+    subjects: LocaleSubjectOverrideMapSchema.optional(),
+    localeStrategy: z.enum(["AUTO", "FORCE"]).default("AUTO"),
+    forcedLocale: LocaleSchema.optional(),
     fromEmail: FromEmailSchema.optional(),
     replyTo: ReplyToSchema.optional(),
     tagFilter: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
@@ -90,7 +175,15 @@ export const CreateCampaignSchema = z
     variants: z.array(VariantInputSchema).min(2).max(5).optional(),
     utmParams: UtmParamsSchema.optional(),
   })
+  .strict()
   .superRefine((v, ctx) => {
+    if (v.localeStrategy === "FORCE" && !v.forcedLocale) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["forcedLocale"],
+        message: "forcedLocale required when localeStrategy=FORCE",
+      });
+    }
     if (v.isAbTest) {
       if (!v.abTestConfig) {
         ctx.addIssue({
@@ -139,7 +232,9 @@ export type CreateCampaignInput = z.infer<typeof CreateCampaignSchema>;
 export const UpdateCampaignSchema = z
   .object({
     name: NameSchema.optional(),
-    subject: SubjectSchema.optional(),
+    subjects: LocaleSubjectOverrideMapSchema.optional(),
+    localeStrategy: z.enum(["AUTO", "FORCE"]).optional(),
+    forcedLocale: LocaleSchema.nullable().optional(),
     fromEmail: FromEmailSchema.optional(),
     replyTo: ReplyToSchema.optional(),
     tagFilter: z.array(z.string().trim().min(1).max(60)).max(20).optional(),

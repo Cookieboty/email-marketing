@@ -13,6 +13,8 @@ import { TagPicker } from "@/components/tag-picker";
 import { swrFetcher } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
+import type { Locale } from "@/app/(dashboard)/templates/_components/types";
+import { formatUserLocaleShort } from "./user-locale-helpers";
 
 interface UserRow {
   id: string;
@@ -22,6 +24,7 @@ interface UserRow {
   optInStatus: string;
   totalSpend: string | number | null;
   orderCount: number;
+  locale: Locale | null;
   createdAt: string;
   tags: { id: string; name: string; color?: string | null }[];
 }
@@ -112,6 +115,18 @@ export default function UsersListPage() {
           ) : (
             <Badge variant="outline">订阅中</Badge>
           ),
+      },
+      {
+        accessorKey: "locale",
+        header: "语言",
+        cell: ({ row }) => (
+          <span
+            className="text-sm tabular-nums"
+            data-testid={`user-locale-${row.original.id}`}
+          >
+            {formatUserLocaleShort(row.original.locale)}
+          </span>
+        ),
       },
       {
         accessorKey: "orderCount",

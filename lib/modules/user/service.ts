@@ -88,6 +88,7 @@ function buildCreateData(
     orderCount: input.orderCount,
     lastOrderAt: input.lastOrderAt ?? null,
     birthDate: input.birthDate ?? null,
+    locale: input.locale ?? null,
   };
   if (input.totalSpend !== undefined) {
     data.totalSpend = new PrismaNS.Decimal(String(input.totalSpend));
@@ -170,6 +171,7 @@ export const userService = {
     if (input.orderCount !== undefined) data.orderCount = input.orderCount;
     if (input.lastOrderAt !== undefined) data.lastOrderAt = input.lastOrderAt;
     if (input.birthDate !== undefined) data.birthDate = input.birthDate;
+    if (input.locale !== undefined) data.locale = input.locale;
     if (input.totalSpend !== undefined) {
       data.totalSpend = new PrismaNS.Decimal(String(input.totalSpend));
     }
