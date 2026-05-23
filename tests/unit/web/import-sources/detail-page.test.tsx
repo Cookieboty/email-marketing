@@ -29,6 +29,7 @@ const source: ImportSourceRow = {
   name: "Acme Users",
   description: null,
   baseUrl: "https://api.example.com/users",
+  sourceKey: null,
   authType: "BEARER",
   authHeader: null,
   hasAuth: true,

@@ -14,6 +14,7 @@
 import { ImportAuthType, ImportJobStatus, Prisma } from "@prisma/client";
 import { audit } from "@/lib/audit";
 import { AppError, ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
+import { logger } from "@/lib/logger";
 import { validateFieldMapping, type FieldMapping } from "./mapper";
 import { encryptSecret } from "./secrets";
 import { validateTargetUrl } from "./security";
@@ -24,11 +25,38 @@ import type {
   UpdateImportSourceInput,
 } from "./schema";
 
+const log = logger.child("import-service");
+
+/**
+ * dev 环境下，POST /jobs 触发后没有独立 worker 进程消费队列时，
+ * 在当前进程里 fire-and-forget 执行一次 runImportJob。
+ *
+ * 仅在 NODE_ENV !== "production" 时启用；生产仍依赖 scripts/worker.ts。
+ * 通过 IMPORT_DEV_INLINE_RUN=0 可显式关闭。
+ *
+ * 用 dynamic import 规避 service ↔ runner 的潜在循环依赖。
+ */
+function maybeRunInlineForDev(jobId: string): void {
+  if (process.env.NODE_ENV === "production") return;
+  if (process.env.IMPORT_DEV_INLINE_RUN === "0") return;
+  setImmediate(() => {
+    void import("./runner")
+      .then(({ runImportJob }) => runImportJob(jobId))
+      .catch((err) => {
+        log.error("dev inline runImportJob failed", {
+          jobId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      });
+  });
+}
+
 export interface SerializedImportSource {
   id: string;
   name: string;
   description: string | null;
   baseUrl: string;
+  sourceKey: string | null;
   authType: ImportAuthType;
   authHeader: string | null;
   hasAuth: boolean;
@@ -55,6 +83,7 @@ export function serializeImportSource(s: ImportSourceRow): SerializedImportSourc
     name: s.name,
     description: s.description,
     baseUrl: s.baseUrl,
+    sourceKey: s.sourceKey,
     authType: s.authType,
     authHeader: s.authHeader,
     hasAuth: !!s.authValue,
@@ -103,6 +132,27 @@ interface ActorCtx {
   req?: { headers: Headers } | null;
 }
 
+/**
+ * 清洗 baseUrl，防止用户从 markdown / IM 粘贴时把反引号、首尾空格、
+ * 包裹引号、零宽字符等装饰字符也带进来。
+ * 配合前端 curl-parser.ts 中的 cleanUrlToken 形成"客户端 + 服务端"
+ * 双重防御，避免后续 fetch / new URL() 直接报错而保存失败。
+ */
+function sanitizeBaseUrl(raw: string): string {
+  let s = raw.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+  while (s.length >= 2) {
+    const head = s[0];
+    const tail = s[s.length - 1];
+    if ((head === "`" || head === "'" || head === '"') && head === tail) {
+      s = s.slice(1, -1).trim();
+    } else {
+      break;
+    }
+  }
+  s = s.replace(/^`+|`+$/g, "").trim();
+  return s;
+}
+
 function assertFieldMapping(fm: FieldMapping): void {
   const errs = validateFieldMapping(fm);
   if (errs.length > 0) {
@@ -126,12 +176,14 @@ export const importSourceService = {
   },
 
   async create(input: CreateImportSourceInput, ctx: ActorCtx): Promise<SerializedImportSource> {
-    validateTargetUrl(input.baseUrl);
+    const cleanedBaseUrl = sanitizeBaseUrl(input.baseUrl);
+    validateTargetUrl(cleanedBaseUrl);
     assertFieldMapping(input.fieldMapping as FieldMapping);
     const data: Prisma.ImportSourceUncheckedCreateInput = {
       name: input.name,
       description: input.description ?? null,
-      baseUrl: input.baseUrl,
+      baseUrl: cleanedBaseUrl,
+      sourceKey: input.sourceKey ?? null,
       authType: input.authType,
       authValue:
         input.authType !== ImportAuthType.NONE && input.authValue
@@ -177,9 +229,11 @@ export const importSourceService = {
     if (input.name !== undefined) data.name = input.name;
     if (input.description !== undefined) data.description = input.description ?? null;
     if (input.baseUrl !== undefined) {
-      validateTargetUrl(input.baseUrl);
-      data.baseUrl = input.baseUrl;
+      const cleanedBaseUrl = sanitizeBaseUrl(input.baseUrl);
+      validateTargetUrl(cleanedBaseUrl);
+      data.baseUrl = cleanedBaseUrl;
     }
+    if (input.sourceKey !== undefined) data.sourceKey = input.sourceKey ?? null;
     if (input.authType !== undefined) data.authType = input.authType;
     if (input.authValue !== undefined) {
       data.authValue =
@@ -271,6 +325,7 @@ export const importSourceService = {
       details: { sourceId, dryRun: input.dryRun, resume: input.resume },
       req: ctx.req ?? null,
     });
+    maybeRunInlineForDev(job.id);
     return job;
   },
 

@@ -27,7 +27,7 @@ import {
   ValidationError,
 } from "@/lib/errors";
 import { getRateLimiter, __resetRateLimiters } from "@/lib/rate-limit";
-import { sendSingle } from "@/lib/resend";
+import { sendSingle } from "@/lib/modules/mail/transport";
 import { render } from "@/lib/template-engine";
 
 export const OPT_IN_TOKEN_TTL_MS = 48 * 60 * 60 * 1000;

@@ -239,6 +239,19 @@ async function seedTags() {
   console.log(`[seed] tags upserted: ${tags.length}`);
 }
 
+async function seedMailProviderSetting() {
+  await prisma.mailProviderSetting.upsert({
+    where: { id: "singleton" },
+    update: {},
+    create: {
+      id: "singleton",
+      activeProvider: "RESEND",
+      activeSmtpId: null,
+    },
+  });
+  console.log("[seed] mail provider setting ensured (singleton)");
+}
+
 async function main() {
   console.log("[seed] start");
   await seedSubscriptionCategories();
@@ -246,6 +259,7 @@ async function main() {
   await seedSystemSegments();
   await seedAudienceSegments();
   await seedTags();
+  await seedMailProviderSetting();
   console.log("[seed] done");
 }
 

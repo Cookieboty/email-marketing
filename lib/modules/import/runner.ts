@@ -29,6 +29,7 @@ import { AppError } from "@/lib/errors";
 import { upsertByExternalIdOrEmail } from "@/lib/modules/user/upsert";
 import {
   type FieldMapping,
+  getByJsonPath,
   mapRow,
   validateFieldMapping,
 } from "./mapper";
@@ -272,7 +273,11 @@ async function processOnePage(
       continue;
     }
     try {
-      const upsert = await upsertByExternalIdOrEmail(result.mapped, {
+      const mappedWithSource = {
+        ...result.mapped,
+        source: result.mapped.source ?? source.sourceKey ?? null,
+      };
+      const upsert = await upsertByExternalIdOrEmail(mappedWithSource, {
         actorType: "SYSTEM",
         auditPrefix: "import",
       });
@@ -371,7 +376,7 @@ export async function runImportJob(jobId: string): Promise<void> {
   });
 
   try {
-    for (;;) {
+    for (; ;) {
       // CANCELLED 检查（每页边界）
       const fresh = await importRepository.getJob(jobId);
       if (!fresh) {
@@ -471,6 +476,12 @@ export async function runImportTest(
   const rows = extractDataArray(body, source.dataJsonPath);
   const preview: unknown[] = [];
   const errors: Array<{ row: number; field: string; message: string }> = [];
+  if (rows.length === 0) {
+    const hint = diagnoseDataJsonPath(body, source.dataJsonPath);
+    if (hint) {
+      errors.push({ row: 0, field: "dataJsonPath", message: hint });
+    }
+  }
   for (let i = 0; i < rows.length; i += 1) {
     const r = mapRow(rows[i], fm);
     if (r.ok) {
@@ -482,4 +493,42 @@ export async function runImportTest(
     }
   }
   return { fetched: rows.length, preview, errors };
+}
+
+/**
+ * 诊断 dataJsonPath：当 extractDataArray 返回 0 行时，扫描响应体，
+ * 找出第一个长度 > 0 的数组型字段，给出建议改成的 JSONPath。
+ * 这是一个“友好提示”，仅用于 Test 端点（不影响真实导入逻辑）。
+ *
+ * 例子：响应是 `{ data: { items: [...] } }`，但用户配了
+ *  `$.data` → 返回提示 `$.data.items`。
+ */
+function diagnoseDataJsonPath(body: unknown, currentPath: string): string | null {
+  if (body === null || typeof body !== "object") {
+    return `响应不是对象/数组（typeof=${typeof body}），无法用 dataJsonPath 提取数组`;
+  }
+  const target =
+    currentPath === "$" ? body : getByJsonPath(body, currentPath);
+  if (Array.isArray(target)) {
+    return `dataJsonPath \`${currentPath}\` 指向的数组长度为 0（接口可能本期就没有数据）`;
+  }
+  const candidates: string[] = [];
+  const visit = (node: unknown, prefix: string, depth: number) => {
+    if (candidates.length >= 5 || depth > 3) return;
+    if (node === null || typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      const path = `${prefix}.${k}`;
+      if (Array.isArray(v) && v.length > 0) {
+        candidates.push(`${path} (len=${v.length})`);
+      } else if (v && typeof v === "object" && !Array.isArray(v)) {
+        visit(v, path, depth + 1);
+      }
+    }
+  };
+  visit(body, "$", 0);
+  if (candidates.length === 0) {
+    return `dataJsonPath \`${currentPath}\` 取到的不是数组，且响应体里没有任何长度 > 0 的数组字段`;
+  }
+  return `dataJsonPath \`${currentPath}\` 指向的不是数组（实际类型：${target === undefined ? "undefined" : typeof target
+    }）。建议改为：${candidates.join(" 或 ")}`;
 }

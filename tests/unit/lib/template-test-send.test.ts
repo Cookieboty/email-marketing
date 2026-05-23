@@ -15,7 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/resend", () => ({
+vi.mock("@/lib/modules/mail/transport", () => ({
   sendSingle: vi.fn(),
 }));
 vi.mock("@/lib/audit", () => ({
@@ -24,7 +24,7 @@ vi.mock("@/lib/audit", () => ({
   maskDetails: (x: unknown) => x,
 }));
 
-import { sendSingle } from "@/lib/resend";
+import { sendSingle } from "@/lib/modules/mail/transport";
 import {
   __resetTestSendLimiter,
   getAdminTestWhitelist,

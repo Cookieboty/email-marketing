@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { href: "/automations", label: "自动化" },
   { href: "/import-sources", label: "数据导入" },
   { href: "/api-clients", label: "API Clients" },
+  { href: "/settings/smtp", label: "SMTP 配置" },
   { href: "/audit-log", label: "审计日志" },
 ] as const;
 

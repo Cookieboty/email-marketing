@@ -14,7 +14,7 @@ import { ForbiddenError, RateLimitError, ValidationError } from "@/lib/errors";
 import { audit } from "@/lib/audit";
 import { normalizeEmail } from "@/lib/email-utils";
 import { __resetRateLimiters, getRateLimiter } from "@/lib/rate-limit";
-import { sendSingle, type SendResult } from "@/lib/resend";
+import { sendSingle, type SendResult } from "@/lib/modules/mail/transport";
 import {
   buildTemplateSnapshot,
   type TemplateWithLocalesForSnapshot,

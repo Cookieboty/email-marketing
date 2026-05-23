@@ -20,7 +20,28 @@ export interface UserTagBrief {
   color: string | null;
 }
 
-export interface UserWithTags extends User {
+/**
+ * 安全的 BigInt → JSON 标量。
+ * - 在 Number.MAX_SAFE_INTEGER 范围内（< 2^53）→ number，前端可直接 Intl.NumberFormat
+ * - 超出 → string，避免精度丢失
+ * - null → null
+ *
+ * 设计动机：amux 的 quota 字段（INT8 列）单值可达数百亿（49,554,480,228），
+ * 超过 INT4，但仍远低于 2^53；为了让 NextResponse.json 不在 BigInt 上炸（JSON
+ * 不支持 bigint），在 repository 出口处统一转换。
+ */
+function bigintToJson(v: bigint | null): number | string | null {
+  if (v === null) return null;
+  if (v <= BigInt(Number.MAX_SAFE_INTEGER) && v >= BigInt(-Number.MAX_SAFE_INTEGER)) {
+    return Number(v);
+  }
+  return v.toString();
+}
+
+export interface UserWithTags extends Omit<User, "balance" | "usedQuota" | "requestCount"> {
+  balance: number | string | null;
+  usedQuota: number | string | null;
+  requestCount: number | string | null;
   tags: UserTagBrief[];
 }
 
@@ -68,9 +89,12 @@ function buildWhere(query: ListUsersQuery): Prisma.UserWhereInput {
 }
 
 function attachTags(user: User & { userTags?: Array<{ tag: UserTagBrief }> }): UserWithTags {
-  const { userTags, ...rest } = user;
+  const { userTags, balance, usedQuota, requestCount, ...rest } = user;
   return {
-    ...(rest as User),
+    ...rest,
+    balance: bigintToJson(balance),
+    usedQuota: bigintToJson(usedQuota),
+    requestCount: bigintToJson(requestCount),
     tags: (userTags ?? []).map((ut) => ({
       id: ut.tag.id,
       name: ut.tag.name,

@@ -17,6 +17,7 @@ export interface ImportSourceRow {
   name: string;
   description: string | null;
   baseUrl: string;
+  sourceKey: string | null;
   authType: ImportAuthType;
   authHeader: string | null;
   hasAuth: boolean;

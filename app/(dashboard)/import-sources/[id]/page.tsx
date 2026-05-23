@@ -220,6 +220,13 @@ export default function ImportSourceDetailPage() {
               {source.authType !== "NONE" && source.hasAuth ? " ✓ 已配置" : ""}
             </Badge>
           </Field>
+          <Field label="来源 sourceKey">
+            {source.sourceKey ? (
+              <code className="text-xs">{source.sourceKey}</code>
+            ) : (
+              <span className="text-xs text-muted-foreground">未设置</span>
+            )}
+          </Field>
           <Field label="分页">
             <span className="text-xs">{PAGINATION_LABELS[source.paginationType]}</span>
           </Field>

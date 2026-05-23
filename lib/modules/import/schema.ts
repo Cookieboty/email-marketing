@@ -22,6 +22,14 @@ const ImportSourceBaseSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   baseUrl: z.string().url(),
+  sourceKey: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9_.\-:]+$/, {
+      message: "sourceKey 只允许字母/数字/`_.-:`",
+    })
+    .optional()
+    .nullable(),
   authType: z.nativeEnum(ImportAuthType).default(ImportAuthType.NONE),
   authValue: z.string().optional(),
   authHeader: z.string().optional(),
@@ -51,6 +59,14 @@ export const CreateImportSourceSchema = ImportSourceBaseSchema.refine(
 export const UpdateImportSourceSchema = ImportSourceBaseSchema.partial().extend({
   /** 显式传 null 表示清空 schedule。 */
   schedule: z.string().max(64).nullable().optional(),
+  sourceKey: z
+    .string()
+    .max(64)
+    .regex(/^[A-Za-z0-9_.\-:]+$/, {
+      message: "sourceKey 只允许字母/数字/`_.-:`",
+    })
+    .nullable()
+    .optional(),
 });
 
 export const TriggerJobSchema = z.object({

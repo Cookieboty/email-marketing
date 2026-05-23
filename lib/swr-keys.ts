@@ -132,6 +132,18 @@ export const swrKeys = {
     return qs ? `/api/api-clients?${qs}` : "/api/api-clients";
   },
   apiClient: (id: string) => `/api/api-clients/${id}`,
+  smtpConfigs: (params?: Record<string, string | number | undefined>) => {
+    if (!params) return "/api/smtp-configs";
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === "") continue;
+      sp.set(k, String(v));
+    }
+    const qs = sp.toString();
+    return qs ? `/api/smtp-configs?${qs}` : "/api/smtp-configs";
+  },
+  smtpConfig: (id: string) => `/api/smtp-configs/${id}`,
+  mailProviderSetting: () => "/api/smtp-configs/activate",
   importSources: () => "/api/import-sources",
   importSource: (id: string) => `/api/import-sources/${id}`,
   importJobs: (

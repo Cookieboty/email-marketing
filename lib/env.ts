@@ -64,6 +64,9 @@ const Schema = z.object({
   IMPORT_MAX_RESPONSE_BYTES: z.coerce.number().int().positive().default(52_428_800),
   IMPORT_SOURCE_SECRET_KEY: z.string().optional(),
   IMPORT_JOB_STALE_MINUTES: z.coerce.number().int().positive().default(60),
+
+  SMTP_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(20),
+  SMTP_TEST_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 });
 
 export type Env = z.infer<typeof Schema>;

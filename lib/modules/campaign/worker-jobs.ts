@@ -1,7 +1,7 @@
 import type { CampaignStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
-import { sendBatch, sendSingle, type SendEmailInput } from "@/lib/resend";
+import { sendBatch, sendSingle, type SendEmailInput } from "@/lib/modules/mail/transport";
 import { logger } from "@/lib/logger";
 import { isSuppressed } from "@/lib/modules/suppression/check";
 import { isOverLimit } from "@/lib/modules/frequency/check";

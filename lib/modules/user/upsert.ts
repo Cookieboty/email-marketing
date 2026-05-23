@@ -57,9 +57,9 @@ export interface UpsertByExternalIdOrEmailInput {
   /** Prisma Decimal: pass as string "123.45" */
   totalSpend?: string | null;
   orderCount?: number | null;
-  balance?: number | null;
-  usedQuota?: number | null;
-  requestCount?: number | null;
+  balance?: bigint | null;
+  usedQuota?: bigint | null;
+  requestCount?: bigint | null;
 }
 
 export interface UpsertActor {

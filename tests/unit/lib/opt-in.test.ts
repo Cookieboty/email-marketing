@@ -45,7 +45,7 @@ vi.mock("@/lib/env", () => ({
   env: () => hoisted.envState,
 }));
 
-vi.mock("@/lib/resend", () => ({
+vi.mock("@/lib/modules/mail/transport", () => ({
   sendSingle: (...args: unknown[]) => hoisted.sendSingleMock(...args),
 }));
 

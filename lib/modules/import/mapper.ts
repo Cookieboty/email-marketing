@@ -43,9 +43,9 @@ export interface MappedUser {
   userLevel?: string | null;
   totalSpend?: string | null;
   orderCount?: number | null;
-  balance?: number | null;
-  usedQuota?: number | null;
-  requestCount?: number | null;
+  balance?: bigint | null;
+  usedQuota?: bigint | null;
+  requestCount?: bigint | null;
 }
 
 export interface MapRowError {
@@ -200,6 +200,36 @@ function asInt(v: unknown): number | null {
   return Math.trunc(n);
 }
 
+/**
+ * 64 位整数转换：用于可能超出 INT4 (>2,147,483,647) 的 token / quota 类字段。
+ * - number → BigInt(Math.trunc)
+ * - 整数字符串 → BigInt(string)
+ * - 其它（小数字符串、NaN、boolean、object…）→ null
+ */
+function asBigInt(v: unknown): bigint | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "bigint") return v;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return null;
+    return BigInt(Math.trunc(v));
+  }
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    if (trimmed.length === 0) return null;
+    if (!/^-?\d+$/.test(trimmed)) {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n)) return null;
+      return BigInt(Math.trunc(n));
+    }
+    try {
+      return BigInt(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function asDecimalString(v: unknown): string | null {
   const n = asFiniteNumber(v);
   if (n === null) return null;
@@ -281,12 +311,18 @@ export function mapRow(raw: unknown, fieldMapping: FieldMapping): MapRowResult {
         warnings.push({ field: "totalSpend", message: `invalid number: ${String(value).slice(0, 50)}` });
       }
       mapped.totalSpend = s;
-    } else if (target === "orderCount" || target === "balance" || target === "usedQuota" || target === "requestCount") {
+    } else if (target === "orderCount") {
       const n = asInt(value);
       if (n === null && value !== null && value !== undefined) {
         warnings.push({ field: target, message: `invalid integer: ${String(value).slice(0, 50)}` });
       }
-      mapped[target] = n;
+      mapped.orderCount = n;
+    } else if (target === "balance" || target === "usedQuota" || target === "requestCount") {
+      const b = asBigInt(value);
+      if (b === null && value !== null && value !== undefined) {
+        warnings.push({ field: target, message: `invalid integer: ${String(value).slice(0, 50)}` });
+      }
+      mapped[target] = b;
     } else if (target === "tags") {
       mapped.tags = asTagArray(value);
     } else if (target.startsWith("metadata.")) {

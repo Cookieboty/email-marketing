@@ -94,6 +94,7 @@ enum AutomationRunStatus {
 enum DeliverabilityAlertType {
   HIGH_BOUNCE_RATE
   HIGH_COMPLAINT_RATE
+  SMTP_DEGRADED
 }
 
 enum AuditActorType {
@@ -133,6 +134,33 @@ enum LocaleStrategy {
   FORCE
 }
 
+enum SmtpSecureMode {
+  NONE
+  STARTTLS
+  TLS
+}
+
+enum SmtpConfigStatus {
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum SmtpTestStatus {
+  OK
+  AUTH_FAILED
+  CONN_FAILED
+  TLS_FAILED
+  TIMEOUT
+  SEND_FAILED
+  UNKNOWN
+}
+
+enum MailProviderType {
+  RESEND
+  SMTP
+}
+
 // =====================================================================
 // 1. 用户域（7）
 // =====================================================================
@@ -155,9 +183,9 @@ model User {
   orderCount  Int       @default(0)
   lastOrderAt DateTime?
 
-  balance      Int?
-  usedQuota    Int?
-  requestCount Int?
+  balance      BigInt?
+  usedQuota    BigInt?
+  requestCount BigInt?
 
   engagementScore    Int       @default(0)
   lastEmailSentAt    DateTime?
@@ -479,11 +507,11 @@ model CampaignVariant {
 }
 
 model CampaignRecipient {
-  id            String  @id @default(cuid())
-  campaignId    String
-  userId        String
-  variantId     String?
-  resendEmailId String? @unique
+  id             String  @id @default(cuid())
+  campaignId     String
+  userId         String
+  variantId      String?
+  resendEmailId  String? @unique
   resolvedLocale Locale
 
   status     RecipientStatus @default(PENDING)
@@ -640,22 +668,22 @@ model DeliverabilityAlert {
 // =====================================================================
 
 model Automation {
-  id            String                @id @default(cuid())
-  name          String
-  triggerType   AutomationTriggerType
-  triggerConfig Json
-  templateId    String?
-  template      EmailTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
-  subjects      Json?
-  localeStrategy LocaleStrategy       @default(AUTO)
-  forcedLocale  Locale?
-  delayMinutes  Int                   @default(0)
-  conditions    Json?
-  status        AutomationStatus      @default(DISABLED)
-  topicId       String?
-  topic         Topic?                @relation(fields: [topicId], references: [id], onDelete: SetNull)
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
+  id             String                @id @default(cuid())
+  name           String
+  triggerType    AutomationTriggerType
+  triggerConfig  Json
+  templateId     String?
+  template       EmailTemplate?        @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  subjects       Json?
+  localeStrategy LocaleStrategy        @default(AUTO)
+  forcedLocale   Locale?
+  delayMinutes   Int                   @default(0)
+  conditions     Json?
+  status         AutomationStatus      @default(DISABLED)
+  topicId        String?
+  topic          Topic?                @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
 
   runs AutomationRun[]
 
@@ -665,18 +693,18 @@ model Automation {
 }
 
 model AutomationRun {
-  id            String              @id @default(cuid())
-  automationId  String
-  userId        String
-  resolvedLocale Locale
+  id               String              @id @default(cuid())
+  automationId     String
+  userId           String
+  resolvedLocale   Locale
   templateSnapshot Json
-  status        AutomationRunStatus @default(SCHEDULED)
-  scheduledAt   DateTime
-  sentAt        DateTime?
-  resendEmailId String?
-  failureReason String?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
+  status           AutomationRunStatus @default(SCHEDULED)
+  scheduledAt      DateTime
+  sentAt           DateTime?
+  resendEmailId    String?
+  failureReason    String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
 
   automation Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
   user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -714,25 +742,25 @@ model AuditLog {
 // =====================================================================
 
 model ApiClient {
-  id              String          @id @default(cuid())
-  name            String
-  description     String?
-  status          ApiClientStatus @default(ACTIVE)
-  tokenHash       String          @unique
-  tokenPrefix     String
-  hmacSecretHash  String?
-  hmacSecretEncrypted String?
-  previousTokenHash       String?
-  previousTokenExpiresAt  DateTime?
-  scopes          String[]
-  ipWhitelist     String[]        @default([])
-  rpsLimit        Int?
-  rphLimit        Int?
-  metadata        Json?
-  lastUsedAt      DateTime?
-  createdBy       String?
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  id                     String          @id @default(cuid())
+  name                   String
+  description            String?
+  status                 ApiClientStatus @default(ACTIVE)
+  tokenHash              String          @unique
+  tokenPrefix            String
+  hmacSecretHash         String?
+  hmacSecretEncrypted    String?
+  previousTokenHash      String?
+  previousTokenExpiresAt DateTime?
+  scopes                 String[]
+  ipWhitelist            String[]        @default([])
+  rpsLimit               Int?
+  rphLimit               Int?
+  metadata               Json?
+  lastUsedAt             DateTime?
+  createdBy              String?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
 
   inboundLogs InboundRequestLog[]
 
@@ -769,6 +797,7 @@ model ImportSource {
   name        String
   description String?
   baseUrl     String
+  sourceKey   String?
   authType    ImportAuthType @default(NONE)
   authValue   String?
   authHeader  String?
@@ -795,6 +824,7 @@ model ImportSource {
   jobs ImportJob[]
 
   @@index([enabled, lastRunAt])
+  @@index([sourceKey])
   @@map("import_sources")
 }
 
@@ -843,4 +873,69 @@ model ImportJobError {
 
   @@index([jobId])
   @@map("import_job_errors")
+}
+
+// =====================================================================
+// 9. 邮件发送通道（SMTP）
+// =====================================================================
+
+model SmtpConfig {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+
+  host           String
+  port           Int
+  secure         SmtpSecureMode @default(STARTTLS)
+  username       String?
+  passwordCipher String?
+  passwordHint   String?
+
+  fromEmail String
+  fromName  String?
+  replyTo   String?
+
+  maxConnections      Int  @default(5)
+  maxMessagesPerConn  Int  @default(100)
+  rateLimitPerSec     Int?
+  connectionTimeoutMs Int  @default(30000)
+  greetingTimeoutMs   Int  @default(30000)
+  socketTimeoutMs     Int  @default(60000)
+
+  rejectUnauthorized Boolean @default(true)
+  requireTls         Boolean @default(true)
+
+  status    SmtpConfigStatus @default(ACTIVE)
+  isDefault Boolean          @default(false)
+
+  lastTestAt     DateTime?
+  lastTestStatus SmtpTestStatus?
+  lastTestError  String?
+  lastSendAt     DateTime?
+  recentFailures Int             @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+  updatedBy String?
+
+  activeFor MailProviderSetting[] @relation("MailProviderActiveSmtp")
+
+  @@index([status])
+  @@index([isDefault])
+  @@map("smtp_configs")
+}
+
+model MailProviderSetting {
+  id             String            @id
+  activeProvider MailProviderType  @default(RESEND)
+  activeSmtpId   String?
+  fallback       MailProviderType?
+
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  activeSmtp SmtpConfig? @relation("MailProviderActiveSmtp", fields: [activeSmtpId], references: [id], onDelete: Restrict)
+
+  @@map("mail_provider_settings")
 }

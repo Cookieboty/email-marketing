@@ -21,6 +21,7 @@ import {
 } from "./form-schema";
 import { FieldMappingEditor } from "./field-mapping-editor";
 import { AuthValueField } from "./auth-value-field";
+import { parseCurlCommand } from "./curl-parser";
 import {
   AUTH_TYPE_LABELS,
   PAGINATION_LABELS,
@@ -50,6 +51,7 @@ function defaultsFor(initial?: ImportSourceRow): CreateImportSourceFormValues {
     name: initial?.name ?? "",
     description: initial?.description ?? "",
     baseUrl: initial?.baseUrl ?? "https://",
+    sourceKey: initial?.sourceKey ?? "",
     authType: initial?.authType ?? "NONE",
     authValue: "",
     authHeader: initial?.authHeader ?? "",
@@ -79,6 +81,8 @@ export function ImportSourceForm({ mode, initial }: ImportSourceFormProps) {
   const [headersError, setHeadersError] = useState<string | null>(null);
   const [fieldMappingValid, setFieldMappingValid] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [curlInput, setCurlInput] = useState("");
+  const [curlError, setCurlError] = useState<string | null>(null);
 
   const form = useForm<CreateImportSourceFormValues>({
     resolver: zodResolver(isEdit ? UpdateImportSourceFormSchema : CreateImportSourceFormSchema),
@@ -90,6 +94,7 @@ export function ImportSourceForm({ mode, initial }: ImportSourceFormProps) {
     control,
     handleSubmit,
     watch,
+    setValue,
     formState: { errors },
   } = form;
 
@@ -118,6 +123,79 @@ export function ImportSourceForm({ mode, initial }: ImportSourceFormProps) {
       setHeadersError(e instanceof Error ? e.message : "JSON 解析失败");
       return null;
     }
+  }
+
+  function handleParseCurl() {
+    const result = parseCurlCommand(curlInput);
+    if (!result.ok) {
+      setCurlError(result.error);
+      toast({ title: "curl 解析失败", description: result.error, variant: "destructive" });
+      return;
+    }
+    const {
+      url,
+      headers,
+      authType: parsedAuthType,
+      authHeader,
+      authValue,
+      pagination,
+    } = result.value;
+    setValue("baseUrl", url, { shouldValidate: true, shouldDirty: true });
+    setValue("authType", parsedAuthType, { shouldValidate: true, shouldDirty: true });
+    if (parsedAuthType !== "NONE" && authValue != null) {
+      setValue("authValue", authValue, { shouldValidate: true, shouldDirty: true });
+      if (isEdit) setKeepAuth(false);
+    }
+    if (parsedAuthType === "API_KEY_HEADER" && authHeader) {
+      setValue("authHeader", authHeader, { shouldValidate: true, shouldDirty: true });
+    }
+    const paginationNotes: string[] = [];
+    if (pagination) {
+      if (pagination.type) {
+        setValue("paginationType", pagination.type, {
+          shouldValidate: true,
+          shouldDirty: true,
+        });
+      }
+      if (pagination.pageParam) {
+        setValue("pageParam", pagination.pageParam, {
+          shouldValidate: true,
+          shouldDirty: true,
+        });
+        paginationNotes.push(`page=${pagination.pageParam}`);
+      }
+      if (pagination.pageSizeParam) {
+        setValue("pageSizeParam", pagination.pageSizeParam, {
+          shouldValidate: true,
+          shouldDirty: true,
+        });
+        paginationNotes.push(`size=${pagination.pageSizeParam}`);
+      }
+      if (pagination.pageSize != null) {
+        setValue("pageSize", pagination.pageSize, {
+          shouldValidate: true,
+          shouldDirty: true,
+        });
+        paginationNotes.push(`pageSize=${pagination.pageSize}`);
+      }
+      if (pagination.cursorParam) {
+        setValue("cursorParam", pagination.cursorParam, {
+          shouldValidate: true,
+          shouldDirty: true,
+        });
+        paginationNotes.push(`cursor=${pagination.cursorParam}`);
+      }
+    }
+    setHeadersJson(JSON.stringify(headers, null, 2));
+    setHeadersError(null);
+    setCurlError(null);
+    toast({
+      title: "已根据 curl 填充表单",
+      description:
+        paginationNotes.length > 0
+          ? `URL：${url}（分页：${paginationNotes.join("，")}）`
+          : `URL：${url}`,
+    });
   }
 
   async function onSubmit(values: CreateImportSourceFormValues) {
@@ -169,6 +247,42 @@ export function ImportSourceForm({ mode, initial }: ImportSourceFormProps) {
 
   return (
     <form className="space-y-6" onSubmit={handleSubmit(onSubmit)} noValidate>
+      <section className="space-y-1.5 rounded-md border border-dashed p-3">
+        <div className="flex items-center justify-between">
+          <Label htmlFor="curl-input" className="!mb-0">
+            从 curl 命令导入（可选）
+          </Label>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={handleParseCurl}
+            disabled={!curlInput.trim()}
+          >
+            解析并填充
+          </Button>
+        </div>
+        <Textarea
+          id="curl-input"
+          rows={4}
+          spellCheck={false}
+          placeholder={`curl 'https://api.example.com/users?limit=100' \\\n  -H 'Authorization: Bearer xxx' \\\n  -H 'X-Tenant: abc'`}
+          value={curlInput}
+          onChange={(e) => {
+            setCurlInput(e.target.value);
+            setCurlError(null);
+          }}
+          className="font-mono text-xs"
+        />
+        {curlError ? (
+          <p className="text-xs text-destructive">{curlError}</p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            粘贴一条 curl 命令，将自动填充 URL、headers 与认证信息（不会修改分页与字段映射）。
+          </p>
+        )}
+      </section>
+
       <section className="grid gap-4 md:grid-cols-2">
         <div className="space-y-1.5">
           <Label htmlFor="name">名称</Label>
@@ -183,6 +297,21 @@ export function ImportSourceForm({ mode, initial }: ImportSourceFormProps) {
           {errors.baseUrl ? (
             <p className="text-xs text-destructive">{errors.baseUrl.message}</p>
           ) : null}
+        </div>
+        <div className="space-y-1.5 md:col-span-2">
+          <Label htmlFor="sourceKey">来源标识 sourceKey（可选）</Label>
+          <Input
+            id="sourceKey"
+            {...register("sourceKey")}
+            placeholder="例如 shopify_main / hubspot_eu / legacy_crm"
+          />
+          {errors.sourceKey ? (
+            <p className="text-xs text-destructive">{errors.sourceKey.message}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              用于辨识导入来源（free-form key）。导入时会写入用户记录的 source 字段，便于后续按来源分发不同策略（字段映射默认值、限速、退订处理等）。
+            </p>
+          )}
         </div>
         <div className="space-y-1.5 md:col-span-2">
           <Label htmlFor="description">描述（可选）</Label>

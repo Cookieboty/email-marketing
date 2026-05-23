@@ -37,10 +37,18 @@ const AuthTypeSchema = z.enum([
 
 const HeadersSchema = z.record(z.string(), z.string()).optional();
 
+const SourceKeySchema = z
+  .string()
+  .max(64)
+  .regex(/^[A-Za-z0-9_.\-:]+$/, {
+    message: "sourceKey 只允许字母/数字 与 `_.-:`",
+  });
+
 const Base = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   baseUrl: HttpsUrl,
+  sourceKey: SourceKeySchema.optional().or(z.literal("")),
   authType: AuthTypeSchema.default("NONE"),
   authValue: z.string().optional(),
   authHeader: z.string().optional(),
@@ -131,6 +139,11 @@ export function buildImportSourcePayload(
   };
 
   if (values.description) payload.description = values.description;
+  if (values.sourceKey && values.sourceKey.trim().length > 0) {
+    payload.sourceKey = values.sourceKey.trim();
+  } else if (isEdit) {
+    payload.sourceKey = null;
+  }
   if (values.authType === "API_KEY_HEADER" && values.authHeader) {
     payload.authHeader = values.authHeader;
   }

@@ -245,7 +245,7 @@ export default function UserDetailPage({ id }: { id: string }) {
                   <Input id="userLevel" {...register("userLevel")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="totalSpend">累计消费</Label>
+                  <Label htmlFor="totalSpend">累计消费金额</Label>
                   <Input id="totalSpend" inputMode="decimal" {...register("totalSpend")} />
                   {formState.errors.totalSpend ? (
                     <p className="text-xs text-destructive">{formState.errors.totalSpend.message}</p>

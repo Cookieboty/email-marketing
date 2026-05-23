@@ -16,6 +16,33 @@ import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
 import type { Locale } from "@/app/(dashboard)/templates/_components/types";
 import { formatUserLocaleShort } from "./user-locale-helpers";
 
+const moneyFormatter = new Intl.NumberFormat("zh-CN", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+const integerFormatter = new Intl.NumberFormat("zh-CN");
+
+function formatMoney(v: string | number | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "—";
+  const n = typeof v === "string" ? Number(v) : v;
+  if (!Number.isFinite(n)) return "—";
+  return moneyFormatter.format(n);
+}
+
+function formatInt(v: number | string | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "string") {
+    if (!/^-?\d+$/.test(v.trim())) return "—";
+    try {
+      return integerFormatter.format(BigInt(v));
+    } catch {
+      return "—";
+    }
+  }
+  if (!Number.isFinite(v)) return "—";
+  return integerFormatter.format(v);
+}
+
 interface UserRow {
   id: string;
   email: string;
@@ -24,6 +51,9 @@ interface UserRow {
   optInStatus: string;
   totalSpend: string | number | null;
   orderCount: number;
+  balance: number | string | null;
+  usedQuota: number | string | null;
+  requestCount: number | string | null;
   locale: Locale | null;
   createdAt: string;
   tags: { id: string; name: string; color?: string | null }[];
@@ -129,8 +159,59 @@ export default function UsersListPage() {
         ),
       },
       {
+        accessorKey: "totalSpend",
+        header: "充值/消费金额",
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums"
+            data-testid={`user-total-spend-${row.original.id}`}
+          >
+            {formatMoney(row.original.totalSpend)}
+          </span>
+        ),
+      },
+      {
+        accessorKey: "balance",
+        header: "AI Token 余额",
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums"
+            data-testid={`user-balance-${row.original.id}`}
+          >
+            {formatInt(row.original.balance)}
+          </span>
+        ),
+      },
+      {
+        accessorKey: "usedQuota",
+        header: "AI 已用 Token",
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums"
+            data-testid={`user-used-quota-${row.original.id}`}
+          >
+            {formatInt(row.original.usedQuota)}
+          </span>
+        ),
+      },
+      {
+        accessorKey: "requestCount",
+        header: "请求数",
+        cell: ({ row }) => (
+          <span
+            className="tabular-nums"
+            data-testid={`user-request-count-${row.original.id}`}
+          >
+            {formatInt(row.original.requestCount)}
+          </span>
+        ),
+      },
+      {
         accessorKey: "orderCount",
         header: "订单数",
+        cell: ({ row }) => (
+          <span className="tabular-nums">{formatInt(row.original.orderCount)}</span>
+        ),
       },
       {
         accessorKey: "createdAt",
