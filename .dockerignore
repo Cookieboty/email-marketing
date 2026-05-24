@@ -1,0 +1,17 @@
+.git
+.github
+.next
+.docker
+node_modules
+dist
+*.md
+.env
+.env.*
+docker-compose.yml
+.prettierrc
+.prettierignore
+.eslintrc.json
+tests
+docs
+playwright.config.ts
+vitest.config.ts
