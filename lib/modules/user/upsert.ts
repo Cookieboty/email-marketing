@@ -138,7 +138,7 @@ export async function upsertByExternalIdOrEmail(
         data.userLevel = input.userLevel;
       }
       if (input.totalSpend !== undefined) data.totalSpend = input.totalSpend;
-      if (input.orderCount !== undefined) data.orderCount = input.orderCount;
+      if (input.orderCount != null) data.orderCount = input.orderCount;
       if (input.balance !== undefined) data.balance = input.balance;
       if (input.usedQuota !== undefined) data.usedQuota = input.usedQuota;
       if (input.requestCount !== undefined) data.requestCount = input.requestCount;
