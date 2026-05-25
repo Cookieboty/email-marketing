@@ -59,10 +59,11 @@ services:
     volumes:
       - ./.docker/pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-email}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-email} && psql -U ${POSTGRES_USER:-email} -d ${POSTGRES_DB:-email_marketing} -c 'SELECT 1'"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   mailpit:
     image: axllent/mailpit:latest
