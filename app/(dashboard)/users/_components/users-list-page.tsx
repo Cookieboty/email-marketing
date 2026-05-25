@@ -1,16 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
-import type { ColumnDef } from "@tanstack/react-table";
+import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { DataTable } from "@/components/data-table";
 import { Pagination } from "@/components/pagination";
 import { TagPicker } from "@/components/tag-picker";
-import { swrFetcher } from "@/lib/api-client";
+import { apiPost, swrFetcher } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
 import type { Locale } from "@/app/(dashboard)/templates/_components/types";
@@ -73,6 +74,11 @@ export default function UsersListPage() {
   const [tagIds, setTagIds] = useState<string[]>([]);
   const [unsubscribed, setUnsubscribed] = useState<"" | "true" | "false">("");
   const [tagFilterMode, setTagFilterMode] = useState<"all" | "any">("all");
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [selectAll, setSelectAll] = useState(false);
+  const [batchMode, setBatchMode] = useState<"add" | "remove" | null>(null);
+  const [batchTagIds, setBatchTagIds] = useState<string[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   const debouncedQ = useDebouncedValue(q, 300);
 
@@ -91,6 +97,27 @@ export default function UsersListPage() {
 
   const columns = useMemo<ColumnDef<UserRow>[]>(
     () => [
+      {
+        id: "select",
+        size: 40,
+        header: ({ table }) => (
+          <input
+            type="checkbox"
+            className="h-4 w-4 rounded border-gray-300"
+            checked={table.getIsAllPageRowsSelected()}
+            onChange={(e) => table.toggleAllPageRowsSelected(e.target.checked)}
+          />
+        ),
+        cell: ({ row }) => (
+          <input
+            type="checkbox"
+            className="h-4 w-4 rounded border-gray-300"
+            checked={row.getIsSelected()}
+            onChange={(e) => row.toggleSelected(e.target.checked)}
+            onClick={(e) => e.stopPropagation()}
+          />
+        ),
+      },
       {
         accessorKey: "email",
         header: "Email",
@@ -226,6 +253,39 @@ export default function UsersListPage() {
   const total = data?.total ?? 0;
   const rows = data?.data ?? [];
 
+  const selectedCount = selectAll ? total : Object.keys(rowSelection).length;
+
+  const getRowId = useCallback((row: UserRow) => row.id, []);
+
+  function resetSelection() {
+    setRowSelection({});
+    setSelectAll(false);
+    setBatchMode(null);
+    setBatchTagIds([]);
+  }
+
+  async function executeBatch() {
+    if (!batchMode || batchTagIds.length === 0) return;
+    setBatchLoading(true);
+    try {
+      const body: Record<string, unknown> = { mode: batchMode, tagIds: batchTagIds };
+      if (selectAll) {
+        body.filter = {
+          ...(debouncedQ ? { q: debouncedQ } : {}),
+          ...(tagIds.length > 0 ? { tagIds, tagFilterMode } : {}),
+          ...(unsubscribed ? { unsubscribed: unsubscribed === "true" } : {}),
+        };
+      } else {
+        body.userIds = Object.keys(rowSelection);
+      }
+      await apiPost("/api/users/tags/batch", body);
+      await mutate();
+      resetSelection();
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
   return (
     <section className="space-y-4">
       <header className="flex items-center justify-between">
@@ -315,11 +375,63 @@ export default function UsersListPage() {
         </div>
       </div>
 
+      {selectedCount > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border bg-muted/50 p-3">
+          <span className="text-sm font-medium">
+            已选 {selectedCount} 位用户
+          </span>
+          {!selectAll && total > pageSize && (
+            <Button variant="link" size="sm" onClick={() => setSelectAll(true)}>
+              选择全部 {total} 个符合条件的用户
+            </Button>
+          )}
+          {selectAll && (
+            <Button variant="link" size="sm" onClick={() => setSelectAll(false)}>
+              仅选当前页
+            </Button>
+          )}
+          <span className="mx-1 h-4 w-px bg-border" />
+          {batchMode === null ? (
+            <>
+              <Button size="sm" variant="outline" onClick={() => setBatchMode("add")}>
+                添加标签
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setBatchMode("remove")}>
+                移除标签
+              </Button>
+              <Button size="sm" variant="ghost" onClick={resetSelection}>
+                取消
+              </Button>
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-muted-foreground">
+                {batchMode === "add" ? "添加" : "移除"}标签：
+              </span>
+              <TagPicker value={batchTagIds} onChange={setBatchTagIds} />
+              <Button
+                size="sm"
+                disabled={batchTagIds.length === 0 || batchLoading}
+                onClick={executeBatch}
+              >
+                {batchLoading ? "处理中..." : "确认"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => { setBatchMode(null); setBatchTagIds([]); }}>
+                返回
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
+
       <DataTable
         columns={columns}
         data={rows}
         loading={isLoading}
         emptyText="未匹配到用户"
+        rowSelection={rowSelection}
+        onRowSelectionChange={setRowSelection}
+        getRowId={getRowId}
       />
       <Pagination
         page={page}

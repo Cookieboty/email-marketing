@@ -200,6 +200,27 @@ export const userRepository = {
   async removeTag(userId: string, tagId: string, db: PrismaTx = prisma): Promise<void> {
     await db.userTag.deleteMany({ where: { userId, tagId } });
   },
+
+  async listIds(query: Omit<ListUsersQuery, "page" | "pageSize" | "sortBy" | "sortDir">, db: PrismaTx = prisma): Promise<string[]> {
+    const where = buildWhere({ ...query, page: 1, pageSize: 1, sortBy: "createdAt", sortDir: "desc" });
+    const rows = await db.user.findMany({ where, select: { id: true } });
+    return rows.map((r) => r.id);
+  },
+
+  async batchAddTags(userIds: string[], tagIds: string[], db: PrismaTx = prisma): Promise<number> {
+    if (userIds.length === 0 || tagIds.length === 0) return 0;
+    const data = userIds.flatMap((userId) => tagIds.map((tagId) => ({ userId, tagId })));
+    const result = await db.userTag.createMany({ data, skipDuplicates: true });
+    return result.count;
+  },
+
+  async batchRemoveTags(userIds: string[], tagIds: string[], db: PrismaTx = prisma): Promise<number> {
+    if (userIds.length === 0 || tagIds.length === 0) return 0;
+    const result = await db.userTag.deleteMany({
+      where: { userId: { in: userIds }, tagId: { in: tagIds } },
+    });
+    return result.count;
+  },
 };
 
 export type UserRepository = typeof userRepository;

@@ -17,7 +17,7 @@ import { logger } from "@/lib/logger";
 import { normalizeEmail, isValidEmail } from "@/lib/email-utils";
 import { audit } from "@/lib/audit";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
-import type { CreateUserInput, ListUsersQuery, UpdateUserInput } from "./schema";
+import type { BatchTagsInput, CreateUserInput, ListUsersQuery, UpdateUserInput } from "./schema";
 import { userRepository, type PrismaTx, type UserWithTags } from "./repository";
 import { resendOptInEmail, sendOptInEmail } from "./opt-in";
 import { onUserCreated, onTagChanged } from "@/lib/modules/automation/service";
@@ -257,6 +257,46 @@ export const userService = {
       details: { email: existing.email, tagId },
       req: ctx.req ?? null,
     });
+  },
+
+  async batchTags(input: BatchTagsInput, ctx: ActorContext): Promise<{ affected: number }> {
+    const { mode, tagIds } = input;
+
+    const userIds = await (async () => {
+      if (input.userIds) return input.userIds;
+      const filter = input.filter!;
+      return userRepository.listIds({
+        q: filter.q,
+        tagIds: filter.tagIds,
+        tagFilterMode: filter.tagFilterMode ?? "all",
+        unsubscribed: filter.unsubscribed,
+      });
+    })();
+
+    if (userIds.length === 0) return { affected: 0 };
+
+    const affected = await prisma.$transaction(async (tx) => {
+      const resolved = await resolveTagIds({ tagIds }, tx);
+      if (mode === "add") {
+        return userRepository.batchAddTags(userIds, resolved, tx);
+      }
+      return userRepository.batchRemoveTags(userIds, resolved, tx);
+    });
+
+    audit({
+      action: `user.batch_${mode}_tags`,
+      entityType: "User",
+      entityId: `batch(${userIds.length})`,
+      actorType: ctx.actorType,
+      details: { mode, tagIds, userCount: userIds.length, affected },
+      req: ctx.req ?? null,
+    });
+
+    for (const userId of userIds) {
+      onTagChanged(userId, tagIds);
+    }
+
+    return { affected };
   },
 
   async resendOptIn(id: string, ctx: ActorContext) {

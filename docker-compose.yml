@@ -56,14 +56,20 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-email}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-email}
       POSTGRES_DB: ${POSTGRES_DB:-email_marketing}
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - ./.docker/pg:/var/lib/postgresql/data
+      - email-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-email} && psql -U ${POSTGRES_USER:-email} -d ${POSTGRES_DB:-email_marketing} -c 'SELECT 1'"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-email} -d ${POSTGRES_DB:-email_marketing}"]
+      interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mailpit:
     image: axllent/mailpit:latest
@@ -76,3 +82,7 @@ services:
       MP_MAX_MESSAGES: 5000
       MP_SMTP_AUTH_ACCEPT_ANY: 1
       MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  email-postgres-data:
+    driver: local

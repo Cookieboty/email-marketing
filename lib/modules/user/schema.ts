@@ -106,3 +106,23 @@ export const SetTagsSchema = z.object({
 export const AddTagsSchema = z.object({
   tagIds: z.array(z.string().min(1)).min(1).max(100),
 });
+
+const BatchTagsFilterSchema = z.object({
+  q: z.string().trim().max(128).optional(),
+  tagIds: z.array(z.string()).optional(),
+  tagFilterMode: z.enum(["any", "all"]).default("all"),
+  unsubscribed: z.boolean().optional(),
+});
+
+export const BatchTagsSchema = z
+  .object({
+    mode: z.enum(["add", "remove"]),
+    tagIds: z.array(z.string().min(1)).min(1).max(100),
+    userIds: z.array(z.string().min(1)).min(1).max(500).optional(),
+    filter: BatchTagsFilterSchema.optional(),
+  })
+  .refine((v) => (v.userIds && !v.filter) || (!v.userIds && v.filter), {
+    message: "Provide exactly one of userIds or filter",
+  });
+
+export type BatchTagsInput = z.infer<typeof BatchTagsSchema>;

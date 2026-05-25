@@ -5,6 +5,8 @@ import {
   getCoreRowModel,
   useReactTable,
   type ColumnDef,
+  type RowSelectionState,
+  type OnChangeFn,
 } from "@tanstack/react-table";
 import {
   Table,
@@ -22,6 +24,9 @@ export interface DataTableProps<TData, TValue = unknown> {
   loading?: boolean;
   emptyText?: string;
   onRowClick?: (row: TData) => void;
+  rowSelection?: RowSelectionState;
+  onRowSelectionChange?: OnChangeFn<RowSelectionState>;
+  getRowId?: (row: TData) => string;
 }
 
 export function DataTable<TData, TValue = unknown>({
@@ -30,11 +35,20 @@ export function DataTable<TData, TValue = unknown>({
   loading,
   emptyText = "暂无数据",
   onRowClick,
+  rowSelection,
+  onRowSelectionChange,
+  getRowId,
 }: DataTableProps<TData, TValue>) {
   const table = useReactTable({
     data,
     columns,
     getCoreRowModel: getCoreRowModel(),
+    ...(rowSelection !== undefined && {
+      enableRowSelection: true,
+      state: { rowSelection },
+      onRowSelectionChange,
+      getRowId,
+    }),
   });
 
   return (
