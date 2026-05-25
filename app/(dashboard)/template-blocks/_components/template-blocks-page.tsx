@@ -32,6 +32,7 @@ import {
 } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
+import { BUILTIN_VARIABLE_NAMES } from "@/lib/template-engine";
 
 interface BlockRow {
   id: string;
@@ -414,6 +415,7 @@ function BlockFormDialog({
             />
             {errors.htmlContent && <p className="text-xs text-destructive">{errors.htmlContent.message}</p>}
           </div>
+          <BlockAvailableVariablesRef />
           <DialogFooter>
             <Button
               type="button"
@@ -434,3 +436,74 @@ function BlockFormDialog({
     </Dialog>
   );
 }
+
+const BUILTIN_DESCRIPTIONS: Record<string, string> = {
+  unsubscribe_url: "退订链接 URL",
+  unsubscribe_link: "退订链接（HTML <a> 标签）",
+  unsubscribe_topic_url: "主题退订链接 URL",
+  unsubscribe_topic_link: "主题退订链接（HTML <a> 标签）",
+  user_email: "收件人邮箱",
+  user_name: "收件人姓名",
+  campaign_name: "活动名称",
+  current_year: "当前年份",
+};
+
+function BlockAvailableVariablesRef() {
+  const [expanded, setExpanded] = useState(false);
+  const { data } = useSWR<{ data: Array<{ key: string; description: string | null }> }>(
+    swrKeys.environmentVariables(),
+    swrFetcher,
+  );
+  const envVars = data?.data ?? [];
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-3">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground"
+        onClick={() => setExpanded(!expanded)}
+      >
+        可用变量参考
+        <span className="text-[10px]">{expanded ? "收起" : "展开"}</span>
+      </button>
+      {expanded ? (
+        <div className="mt-2 space-y-2">
+          <div>
+            <span className="text-[10px] font-medium text-muted-foreground">内置变量</span>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {BUILTIN_VARIABLE_NAMES.map((name) => (
+                <span
+                  key={name}
+                  className="cursor-pointer rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono hover:bg-accent"
+                  title={BUILTIN_DESCRIPTIONS[name] ?? name}
+                  onClick={() => navigator.clipboard.writeText(`{{${name}}}`)}
+                >
+                  {`{{${name}}}`}
+                </span>
+              ))}
+            </div>
+          </div>
+          {envVars.length > 0 ? (
+            <div>
+              <span className="text-[10px] font-medium text-muted-foreground">环境变量</span>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {envVars.map((v) => (
+                  <span
+                    key={v.key}
+                    className="cursor-pointer rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono hover:bg-accent"
+                    title={v.description ?? v.key}
+                    onClick={() => navigator.clipboard.writeText(`{{${v.key}}}`)}
+                  >
+                    {`{{${v.key}}}`}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <p className="text-[10px] text-muted-foreground">点击变量名可复制到剪贴板</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+

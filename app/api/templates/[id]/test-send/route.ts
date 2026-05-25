@@ -22,6 +22,7 @@ export const POST = withAuth(async (session, request: Request, ctx: Ctx) => {
     to: input.to,
     locale: input.locale,
     variables: input.variables,
+    channelId: input.channelId,
     template: tpl,
     req: { headers: request.headers },
   });

@@ -12,12 +12,14 @@ const NAV_ITEMS = [
   { href: "/subscription-categories", label: "订阅分类" },
   { href: "/templates", label: "模板" },
   { href: "/template-blocks", label: "模板片段" },
+  { href: "/environment-variables", label: "环境变量" },
   { href: "/media", label: "媒体" },
   { href: "/campaigns", label: "活动" },
   { href: "/automations", label: "自动化" },
   { href: "/import-sources", label: "数据导入" },
   { href: "/api-clients", label: "API Clients" },
   { href: "/settings/smtp", label: "SMTP 配置" },
+  { href: "/settings/channels", label: "发件通道" },
   { href: "/audit-log", label: "审计日志" },
 ] as const;
 

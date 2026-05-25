@@ -30,6 +30,7 @@ function makeForm(overrides: Partial<CampaignFormState> = {}): CampaignFormState
     forcedLocale: "",
     fromEmail: "",
     replyTo: "",
+    sendingChannelId: "",
     tagFilter: "",
     tagFilterMode: "ANY",
     segmentId: "",

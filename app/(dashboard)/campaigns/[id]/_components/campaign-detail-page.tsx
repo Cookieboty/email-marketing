@@ -6,6 +6,17 @@ import useSWR from "swr";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -81,6 +92,10 @@ export default function CampaignDetailPage({ id }: { id: string }) {
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<{ label: string; action: string; destructive?: boolean } | null>(null);
+  const [testSendOpen, setTestSendOpen] = useState(false);
+  const [testSendTo, setTestSendTo] = useState("");
+  const [testSendLocale, setTestSendLocale] = useState<"zh" | "en">("zh");
+  const [testSending, setTestSending] = useState(false);
 
   const { data: c, isLoading, mutate } = useSWR<CampaignDetail>(
     swrKeys.campaign(id),
@@ -108,6 +123,27 @@ export default function CampaignDetailPage({ id }: { id: string }) {
     } finally {
       setBusy(false);
       setConfirmAction(null);
+    }
+  }
+
+  async function handleTestSend() {
+    if (!testSendTo.trim()) {
+      toast({ title: "请填写收件人", variant: "destructive" });
+      return;
+    }
+    setTestSending(true);
+    try {
+      await apiPost(`/api/campaigns/${id}/test-send`, {
+        to: testSendTo.trim(),
+        locale: testSendLocale,
+      });
+      toast({ title: "已发送", description: `${testSendTo.trim()}（${testSendLocale === "zh" ? "中文" : "English"}）` });
+      setTestSendOpen(false);
+      setTestSendTo("");
+    } catch (e) {
+      toast({ title: "测试发送失败", description: asMessage(e), variant: "destructive" });
+    } finally {
+      setTestSending(false);
     }
   }
 
@@ -167,6 +203,17 @@ export default function CampaignDetailPage({ id }: { id: string }) {
         <Badge variant={cfg.variant}>{cfg.label}</Badge>
         {c.isAbTest && <Badge variant="outline">A/B 测试</Badge>}
         <div className="ml-auto flex gap-2">
+          {c.status !== "COMPLETED" && c.status !== "CANCELLED" && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => setTestSendOpen(true)}
+              data-testid="action-test-send"
+            >
+              测试发送
+            </Button>
+          )}
           {actions.map((a) => (
             <Button
               key={a.action}
@@ -296,6 +343,67 @@ export default function CampaignDetailPage({ id }: { id: string }) {
           if (confirmAction) await runAction(confirmAction.action);
         }}
       />
+
+      <Dialog
+        open={testSendOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setTestSendTo("");
+            setTestSendOpen(false);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>测试发送</DialogTitle>
+            <DialogDescription>
+              收件人必须配置在 <code>ADMIN_TEST_EMAILS</code> 白名单中。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="test-send-to">收件人</Label>
+              <Input
+                id="test-send-to"
+                type="email"
+                value={testSendTo}
+                onChange={(e) => setTestSendTo(e.target.value)}
+                placeholder="admin@example.com"
+                autoFocus
+                data-testid="campaign-test-send-to"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="test-send-locale">语言</Label>
+              <Select
+                id="test-send-locale"
+                value={testSendLocale}
+                onChange={(e) => setTestSendLocale(e.target.value as "zh" | "en")}
+                data-testid="campaign-test-send-locale"
+              >
+                <option value="zh">中文</option>
+                <option value="en">English</option>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setTestSendOpen(false)}
+              disabled={testSending}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleTestSend}
+              disabled={testSending}
+              data-testid="campaign-test-send-submit"
+            >
+              {testSending ? "发送中..." : "发送"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

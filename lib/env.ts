@@ -30,7 +30,6 @@ const Schema = z.object({
     .optional()
     .transform((v) => v === "true"),
   UPLOAD_DIR: z.string().default("./uploads"),
-  ADMIN_TEST_EMAILS: z.string().optional(),
 
   FREQUENCY_CAP_DEFAULT_MAX: z.coerce.number().int().positive().default(10),
   FREQUENCY_CAP_DEFAULT_DAYS: z.coerce.number().int().positive().default(7),

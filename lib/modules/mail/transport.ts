@@ -1,185 +1,224 @@
 /**
  * 统一发件传输层。
  *
- * 关联 spec：docs/superpowers/specs/modules/smtp-configuration.md（"发送层抽象"小节）
- *
  * 设计要点：
- *  - 对外暴露与 lib/resend.ts 同形态的 sendSingle/sendBatch；返回 SendResult。
- *  - getActiveTransport() 读取 MailProviderSetting，按 activeProvider 分发：
- *      RESEND → 包装现有 lib/resend.ts；
- *      SMTP   → 解密 + 复用 nodemailer pool transport；
- *  - 进程内 60 秒缓存 + 显式 invalidateActiveTransport()（activate API 调用后立即失效）。
- *  - 同时刻只构造一个 nodemailer pool：用 in-flight Promise 串行化构造。
- *  - 错误归一化：复用 lib/resend.ts 的 SendResult 形态；SMTP 端的错误统一映射为
- *    `{ ok:false, error, statusCode? }`，与 Resend 错误共享 worker 的重试路径。
- *  - sendBatch 在 SMTP 实现里降级为顺序单发 + 速率节流（rateLimitPerSec），保序返回。
- *  - 任何"读 DB / 解密 / 构造 transport"失败都视为最后一道兜底：logger.error 并 fallback
- *    到 RESEND，避免因配置错误把整条发件链路打死。
+ *  - 对外暴露 sendSingle/sendBatch（便捷包装，走系统默认通道）+ getTransportForChannel。
+ *  - getTransportForChannel(channelId) 读 SendingChannel → 构造对应 transport。
+ *  - getSystemDefaultTransport() 读 isSystemDefault=true 的 channel，用于系统邮件。
+ *  - ResendTransport 接受注入的 Resend client（不再读全局 env key）。
+ *  - SmtpTransport 与之前一致，解密 + nodemailer pool。
+ *  - 错误归一化：复用 SendResult 形态。
+ *  - sendBatch 在 SMTP 实现里降级为顺序单发 + 速率节流（rateLimitPerSec）。
  */
 
+import { Resend } from "resend";
 import { createTransport, type Transporter } from "nodemailer";
-import type { MailProviderSetting, SmtpConfig } from "@prisma/client";
+import type { SmtpConfig } from "@prisma/client";
 
 import { logger } from "@/lib/logger";
-import { decryptSmtpPassword } from "@/lib/modules/smtp/crypto";
-import {
-  mailProviderSettingRepository,
-  smtpConfigRepository,
-} from "@/lib/modules/smtp/repository";
-import {
-  sendBatch as resendSendBatch,
-  sendSingle as resendSendSingle,
-  type SendEmailInput,
-  type SendResult,
-} from "@/lib/resend";
+import { decryptSmtpPassword, decryptResendApiKey } from "@/lib/modules/smtp/crypto";
+import { prisma } from "@/lib/prisma";
 
-export type { SendEmailInput, SendResult };
+export interface SendEmailInput {
+  from: string;
+  to: string | string[];
+  subject: string;
+  html: string;
+  text?: string;
+  replyTo?: string;
+  headers?: Record<string, string>;
+  tags?: { name: string; value: string }[];
+}
+
+export type SendResult =
+  | { ok: true; id: string }
+  | { ok: false; error: string; rateLimited?: boolean; retryAfterMs?: number; statusCode?: number };
 
 export interface MailTransport {
-  /** 标识当前生效的 provider 类型 + 关联 SmtpConfig.id（仅 SMTP 时有值）。 */
   readonly provider: "RESEND" | "SMTP";
-  readonly smtpId: string | null;
+  readonly channelId: string | null;
   sendSingle(input: SendEmailInput): Promise<SendResult>;
   sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]>;
-  /** 关闭底层连接池（仅 SMTP 实际使用）；在 invalidate 时由模块自动调用。 */
   close(): Promise<void>;
 }
 
-const CACHE_TTL_MS = 60_000;
-
-interface CacheEntry {
-  transport: MailTransport;
-  builtAt: number;
-}
-
-let cached: CacheEntry | null = null;
-let inflight: Promise<MailTransport> | null = null;
-
-/** 调试 / 测试用：手动失效缓存。activateProvider 调用此函数让通道立即生效。 */
-export async function invalidateActiveTransport(): Promise<void> {
-  const old = cached;
-  cached = null;
-  inflight = null;
-  if (old) {
-    try {
-      await old.transport.close();
-    } catch (err) {
-      logger.warn("close stale transport failed", {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
-
-/** 仅供单测：完全清空状态。 */
-export function __resetTransportCacheForTest(): void {
-  cached = null;
-  inflight = null;
-}
+// ───────────────────────────── Channel-based transport ─────────────────────────────
 
 /**
- * 取当前激活的发件 transport。
- *  - 命中缓存（且 signature 一致、未超 TTL）直接返回；
- *  - 否则构造新 transport，并把 in-flight Promise 暴露给并发调用方共享。
+ * 为指定 SendingChannel 构造 transport。每次调用新建（不缓存），适用于 worker 批次粒度。
  */
-export async function getActiveTransport(now: number = Date.now()): Promise<MailTransport> {
-  if (cached && now - cached.builtAt < CACHE_TTL_MS) return cached.transport;
+export async function getTransportForChannel(channelId: string): Promise<MailTransport> {
+  const channel = await prisma.sendingChannel.findUnique({
+    where: { id: channelId },
+    include: { smtpConfig: true, resendConfig: true },
+  });
+  if (!channel) throw new Error(`SendingChannel not found: ${channelId}`);
+  if (channel.status !== "ACTIVE") throw new Error(`SendingChannel is ${channel.status}: ${channelId}`);
 
-  if (inflight) return inflight;
-
-  inflight = buildTransport()
-    .then((t) => {
-      cached = { transport: t, builtAt: Date.now() };
-      return t;
-    })
-    .finally(() => {
-      inflight = null;
-    });
-
-  return inflight;
-}
-
-async function buildTransport(): Promise<MailTransport> {
-  let setting: MailProviderSetting;
-  try {
-    setting = await mailProviderSettingRepository.get();
-  } catch (err) {
-    logger.error("read MailProviderSetting failed; falling back to RESEND", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return new ResendTransport();
+  if (channel.providerType === "RESEND") {
+    if (!channel.resendConfig) throw new Error(`SendingChannel ${channelId} missing resendConfig`);
+    if (channel.resendConfig.status !== "ACTIVE") {
+      throw new Error(`ResendConfig is ${channel.resendConfig.status}`);
+    }
+    const apiKey = decryptResendApiKey(channel.resendConfig.apiKeyCipher);
+    const client = new Resend(apiKey);
+    return new ResendTransport(client, channelId);
   }
-
-  if (setting.activeProvider === "RESEND") return new ResendTransport();
 
   // SMTP
-  const smtpId = setting.activeSmtpId;
-  if (!smtpId) {
-    logger.error(
-      "MailProviderSetting.activeProvider=SMTP but activeSmtpId is null; falling back to RESEND",
-    );
-    return new ResendTransport();
-  }
-
-  let config: SmtpConfig | null;
-  try {
-    config = await smtpConfigRepository.findById(smtpId);
-  } catch (err) {
-    logger.error("load SmtpConfig failed; falling back to RESEND", {
-      smtpId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return new ResendTransport();
-  }
-  if (!config || config.status !== "ACTIVE") {
-    logger.error("active SmtpConfig missing or not ACTIVE; falling back to RESEND", {
-      smtpId,
-      status: config?.status ?? null,
-    });
-    return new ResendTransport();
+  if (!channel.smtpConfig) throw new Error(`SendingChannel ${channelId} missing smtpConfig`);
+  if (channel.smtpConfig.status !== "ACTIVE") {
+    throw new Error(`SmtpConfig is ${channel.smtpConfig.status}`);
   }
 
   let plainPassword: string | null = null;
-  if (config.passwordCipher) {
-    try {
-      plainPassword = decryptSmtpPassword(config.passwordCipher);
-    } catch (err) {
-      logger.error("decrypt SmtpConfig password failed; falling back to RESEND", {
-        smtpId,
-        message: err instanceof Error ? err.message : String(err),
-      });
-      return new ResendTransport();
-    }
+  if (channel.smtpConfig.passwordCipher) {
+    plainPassword = decryptSmtpPassword(channel.smtpConfig.passwordCipher);
   }
+  return new SmtpTransport(channel.smtpConfig, plainPassword, channelId);
+}
 
+/**
+ * 取系统默认通道的 transport。用于系统邮件（opt-in 等）。
+ */
+export async function getSystemDefaultTransport(): Promise<MailTransport> {
+  const channel = await prisma.sendingChannel.findFirst({
+    where: { isSystemDefault: true, status: "ACTIVE" },
+  });
+  if (!channel) throw new Error("No system default SendingChannel configured");
+  return getTransportForChannel(channel.id);
+}
+
+// ───────────────────────────── 便捷转发（系统邮件用） ─────────────────────────────
+
+export async function sendSingle(input: SendEmailInput): Promise<SendResult> {
+  const t = await getSystemDefaultTransport();
   try {
-    return new SmtpTransport(config, plainPassword);
-  } catch (err) {
-    logger.error("build SmtpTransport failed; falling back to RESEND", {
-      smtpId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return new ResendTransport();
+    return await t.sendSingle(input);
+  } finally {
+    await t.close();
+  }
+}
+
+export async function sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]> {
+  const t = await getSystemDefaultTransport();
+  try {
+    return await t.sendBatch(inputs);
+  } finally {
+    await t.close();
   }
 }
 
 // ───────────────────────────── ResendTransport ─────────────────────────────
 
+function normalizeResendError(err: unknown): SendResult {
+  let message = "Unknown send error";
+  if (err instanceof Error) {
+    message = err.message;
+  } else if (err && typeof err === "object" && "message" in err) {
+    const m = (err as { message?: unknown }).message;
+    if (typeof m === "string" && m.length > 0) message = m;
+  } else if (typeof err === "string") {
+    message = err;
+  }
+
+  let statusCode: number | undefined;
+  let rateLimited = false;
+  let retryAfterMs: number | undefined;
+
+  if (err && typeof err === "object") {
+    const e = err as Record<string, unknown>;
+    const status = (e.statusCode as number) ?? (e.status as number) ?? undefined;
+    statusCode = typeof status === "number" ? status : undefined;
+    const name = (e.name as string) ?? "";
+    const msg = message.toLowerCase();
+    rateLimited =
+      status === 429 ||
+      name === "rate_limit_exceeded" ||
+      msg.includes("rate limit") ||
+      msg.includes("too many requests");
+    if (rateLimited) {
+      const headers = e.headers as Record<string, string> | undefined;
+      const retryAfter = headers?.["retry-after"] ?? headers?.["Retry-After"];
+      if (typeof retryAfter === "string") {
+        const sec = Number(retryAfter);
+        if (Number.isFinite(sec)) retryAfterMs = sec * 1000;
+      }
+    }
+  }
+  return { ok: false, error: message, rateLimited, retryAfterMs, statusCode };
+}
+
 export class ResendTransport implements MailTransport {
   readonly provider = "RESEND" as const;
-  readonly smtpId: string | null = null;
+  readonly channelId: string | null;
+  private readonly client: Resend;
 
-  sendSingle(input: SendEmailInput): Promise<SendResult> {
-    return resendSendSingle(input);
+  constructor(client: Resend, channelId: string | null = null) {
+    this.client = client;
+    this.channelId = channelId;
   }
 
-  sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]> {
-    return resendSendBatch(inputs);
+  async sendSingle(input: SendEmailInput): Promise<SendResult> {
+    try {
+      const { data, error } = await this.client.emails.send({
+        from: input.from,
+        to: input.to,
+        subject: input.subject,
+        html: input.html,
+        ...(input.text ? { text: input.text } : {}),
+        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        ...(input.headers ? { headers: input.headers } : {}),
+        ...(input.tags ? { tags: input.tags } : {}),
+      });
+      if (error) {
+        logger.warn("resend send error", { error: error.message, name: error.name });
+        return normalizeResendError(error);
+      }
+      if (!data?.id) return { ok: false, error: "resend returned no id" };
+      return { ok: true, id: data.id };
+    } catch (err) {
+      logger.warn("resend send threw", { message: err instanceof Error ? err.message : String(err) });
+      return normalizeResendError(err);
+    }
   }
 
-  async close(): Promise<void> {
-    /* Resend 客户端无显式池可关 */
+  async sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]> {
+    if (inputs.length === 0) return [];
+    if (inputs.length > 100) {
+      throw new Error(`sendBatch supports up to 100 emails per call, got ${inputs.length}`);
+    }
+    const payload = inputs.map((i) => ({
+      from: i.from,
+      to: i.to,
+      subject: i.subject,
+      html: i.html,
+      ...(i.text ? { text: i.text } : {}),
+      ...(i.replyTo ? { replyTo: i.replyTo } : {}),
+      ...(i.headers ? { headers: i.headers } : {}),
+      ...(i.tags ? { tags: i.tags } : {}),
+    }));
+    try {
+      const { data, error } = await this.client.batch.send(payload);
+      if (error) {
+        logger.warn("resend batch error", { error: error.message, name: error.name });
+        const norm = normalizeResendError(error);
+        return inputs.map(() => norm);
+      }
+      const items = data?.data ?? [];
+      return inputs.map((_, idx) => {
+        const item = items[idx];
+        if (!item || !item.id) return { ok: false, error: "missing batch item id" };
+        return { ok: true, id: item.id };
+      });
+    } catch (err) {
+      logger.warn("resend batch threw", { message: err instanceof Error ? err.message : String(err) });
+      const norm = normalizeResendError(err);
+      return inputs.map(() => norm);
+    }
   }
+
+  async close(): Promise<void> {}
 }
 
 // ───────────────────────────── SmtpTransport ─────────────────────────────
@@ -193,7 +232,7 @@ interface NodemailerLikeError {
 
 export class SmtpTransport implements MailTransport {
   readonly provider = "SMTP" as const;
-  readonly smtpId: string;
+  readonly channelId: string | null;
   private readonly transporter: Transporter;
   private readonly fromHeader: string;
   private readonly replyTo: string | null;
@@ -203,10 +242,10 @@ export class SmtpTransport implements MailTransport {
   constructor(
     config: SmtpConfig,
     plainPassword: string | null,
-    /** 测试注入：替换 nodemailer.createTransport，便于单元测试不开真 socket。 */
+    channelId: string | null = null,
     transporterFactory: typeof createTransport = createTransport,
   ) {
-    this.smtpId = config.id;
+    this.channelId = channelId;
     this.fromHeader = config.fromName
       ? `${config.fromName} <${config.fromEmail}>`
       : config.fromEmail;
@@ -241,10 +280,6 @@ export class SmtpTransport implements MailTransport {
     return this.scheduledSend(input);
   }
 
-  /**
-   * SMTP 没有 batch API：顺序单发；rateLimitPerSec 决定相邻两封的最小间隔。
-   * 顺序由 `inputs` 决定，保证返回数组与输入一一对应（与 Resend 行为对齐）。
-   */
   async sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]> {
     const out: SendResult[] = [];
     for (const input of inputs) {
@@ -256,9 +291,7 @@ export class SmtpTransport implements MailTransport {
   async close(): Promise<void> {
     try {
       this.transporter.close();
-    } catch {
-      /* nodemailer 的 close 同步且不抛，但保险起见忽略 */
-    }
+    } catch { /* ignore */ }
   }
 
   private async scheduledSend(input: SendEmailInput): Promise<SendResult> {
@@ -299,7 +332,7 @@ export class SmtpTransport implements MailTransport {
           ? (e.responseCode as number)
           : undefined;
       logger.warn("smtp send error", {
-        smtpId: this.smtpId,
+        channelId: this.channelId,
         code: typeof e.code === "string" ? e.code : undefined,
         statusCode,
         message,
@@ -318,6 +351,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ───────────────────────────── 连接验证 ─────────────────────────────
+
+/** @deprecated No longer caches globally; kept for backward compat with SmtpService. */
+export async function invalidateActiveTransport(): Promise<void> {}
+
+/** @deprecated Test helper; no longer needed. */
+export function __resetTransportCacheForTest(): void {}
+
+/** @deprecated Use getTransportForChannel or getSystemDefaultTransport. */
+export const getActiveTransport = getSystemDefaultTransport;
 
 export interface VerifySmtpConnectionInput {
   host: string;
@@ -339,13 +381,6 @@ export interface VerifySmtpConnectionResult {
   responseCode?: number;
 }
 
-/**
- * 不发邮件，只用 nodemailer.verify() 验证 SMTP 服务器可达 + 鉴权通过。
- *
- * - 一次性 transporter（pool=false），用完即关；
- * - 错误归一化：返回 { ok:false, error, code?, responseCode? }，
- *   不抛异常，调用方按 SmtpTestStatus 写回 DB。
- */
 export async function verifySmtpConnection(
   input: VerifySmtpConnectionInput,
   transporterFactory: typeof createTransport = createTransport,
@@ -392,24 +427,6 @@ export async function verifySmtpConnection(
   } finally {
     try {
       transporter.close();
-    } catch {
-      /* ignore */
-    }
+    } catch { /* ignore */ }
   }
-}
-
-// ───────────────────────────── 便捷转发 ─────────────────────────────
-
-/**
- * 便捷包装：单封发送，等价于 `(await getActiveTransport()).sendSingle(input)`。
- * 提供给迁移自 lib/resend.ts 的调用方零摩擦切换。
- */
-export async function sendSingle(input: SendEmailInput): Promise<SendResult> {
-  const t = await getActiveTransport();
-  return t.sendSingle(input);
-}
-
-export async function sendBatch(inputs: SendEmailInput[]): Promise<SendResult[]> {
-  const t = await getActiveTransport();
-  return t.sendBatch(inputs);
 }

@@ -21,7 +21,6 @@ import {
   randomBytes,
 } from "node:crypto";
 
-const HKDF_INFO = Buffer.from("smtp.password.v1", "utf8");
 const HKDF_SALT = Buffer.from("email-marketing/smtp/v1", "utf8");
 const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
@@ -46,37 +45,36 @@ function readMasterSecret(): string {
   return raw;
 }
 
-/**
- * 派生 SMTP 凭证专用密钥（导出仅供测试）。
- *
- * 同样的 master secret + 同样的 info/salt 必然得到同样的 key，
- * 这是 HKDF 的确定性，也是密文跨进程可解密的前提。
- */
-export function deriveSmtpKey(masterSecret: string = readMasterSecret()): Buffer {
+function deriveKey(info: string, masterSecret: string = readMasterSecret()): Buffer {
   const ikm = Buffer.from(masterSecret, "utf8");
-  const derived = hkdfSync("sha256", ikm, HKDF_SALT, HKDF_INFO, KEY_LENGTH);
+  const derived = hkdfSync("sha256", ikm, HKDF_SALT, Buffer.from(info, "utf8"), KEY_LENGTH);
   return Buffer.from(derived);
 }
 
 /**
- * 加密 SMTP 密码（或任意短凭证）。
- *
- * - 输入：UTF-8 明文，长度上限 1KB；超过抛 `SmtpCryptoError`。
- * - 输出：`iv:cipher:tag` hex 串，可直接写入 `SmtpConfig.passwordCipher`。
- * - 每次调用使用独立随机 IV，相同明文每次产出不同密文（语义安全）。
+ * 派生 SMTP 凭证专用密钥（导出仅供测试）。
  */
-export function encryptSmtpPassword(plaintext: string): string {
+export function deriveSmtpKey(masterSecret: string = readMasterSecret()): Buffer {
+  return deriveKey("smtp.password.v1", masterSecret);
+}
+
+/**
+ * 派生 Resend API Key 专用密钥（导出仅供测试）。
+ */
+export function deriveResendKey(masterSecret: string = readMasterSecret()): Buffer {
+  return deriveKey("resend.apikey.v1", masterSecret);
+}
+
+function encryptWithKey(plaintext: string, key: Buffer): string {
   if (typeof plaintext !== "string" || plaintext.length === 0) {
-    throw new SmtpCryptoError("plaintext password must be a non-empty string");
+    throw new SmtpCryptoError("plaintext must be a non-empty string");
   }
   const plainBuf = Buffer.from(plaintext, "utf8");
   if (plainBuf.byteLength > MAX_PLAINTEXT_BYTES) {
     throw new SmtpCryptoError(
-      `plaintext password too long (${plainBuf.byteLength} > ${MAX_PLAINTEXT_BYTES} bytes)`,
+      `plaintext too long (${plainBuf.byteLength} > ${MAX_PLAINTEXT_BYTES} bytes)`,
     );
   }
-
-  const key = deriveSmtpKey();
   const iv = randomBytes(IV_LENGTH);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const ciphertext = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
@@ -84,21 +82,17 @@ export function encryptSmtpPassword(plaintext: string): string {
   return `${iv.toString("hex")}:${ciphertext.toString("hex")}:${tag.toString("hex")}`;
 }
 
-/**
- * 解密 `passwordCipher`。失败时统一抛 `SmtpCryptoError`，调用方应在外部映射为
- * 合适的 HTTP / 任务级错误，且**绝不能将异常 message 透传到客户端或日志**。
- */
-export function decryptSmtpPassword(encrypted: string): string {
+function decryptWithKey(encrypted: string, key: Buffer): string {
   if (typeof encrypted !== "string" || encrypted.length === 0) {
-    throw new SmtpCryptoError("encrypted password is empty");
+    throw new SmtpCryptoError("encrypted value is empty");
   }
   const parts = encrypted.split(":");
   if (parts.length !== 3) {
-    throw new SmtpCryptoError("malformed encrypted SMTP password");
+    throw new SmtpCryptoError("malformed encrypted value");
   }
   const [ivHex, cipherHex, tagHex] = parts;
   if (!ivHex || !cipherHex || !tagHex) {
-    throw new SmtpCryptoError("malformed encrypted SMTP password");
+    throw new SmtpCryptoError("malformed encrypted value");
   }
 
   let iv: Buffer;
@@ -109,13 +103,12 @@ export function decryptSmtpPassword(encrypted: string): string {
     cipherBuf = Buffer.from(cipherHex, "hex");
     tag = Buffer.from(tagHex, "hex");
   } catch {
-    throw new SmtpCryptoError("malformed encrypted SMTP password");
+    throw new SmtpCryptoError("malformed encrypted value");
   }
   if (iv.byteLength !== IV_LENGTH || tag.byteLength !== 16) {
-    throw new SmtpCryptoError("malformed encrypted SMTP password");
+    throw new SmtpCryptoError("malformed encrypted value");
   }
 
-  const key = deriveSmtpKey();
   const decipher = createDecipheriv(ALGORITHM, key, iv);
   decipher.setAuthTag(tag);
 
@@ -123,19 +116,58 @@ export function decryptSmtpPassword(encrypted: string): string {
     const plain = Buffer.concat([decipher.update(cipherBuf), decipher.final()]);
     return plain.toString("utf8");
   } catch {
-    // GCM tag mismatch / key mismatch / 数据被篡改 → 统一隐匿原因
-    throw new SmtpCryptoError("failed to decrypt SMTP password");
+    throw new SmtpCryptoError("failed to decrypt value");
   }
 }
 
+// ── SMTP Password ──
+
+/**
+ * 加密 SMTP 密码。
+ * 输出：`iv:cipher:tag` hex 串。
+ */
+export function encryptSmtpPassword(plaintext: string): string {
+  return encryptWithKey(plaintext, deriveSmtpKey());
+}
+
+/**
+ * 解密 `passwordCipher`。
+ */
+export function decryptSmtpPassword(encrypted: string): string {
+  return decryptWithKey(encrypted, deriveSmtpKey());
+}
+
+// ── Resend API Key ──
+
+/**
+ * 加密 Resend API Key。
+ * 输出：`iv:cipher:tag` hex 串。
+ */
+export function encryptResendApiKey(plaintext: string): string {
+  return encryptWithKey(plaintext, deriveResendKey());
+}
+
+/**
+ * 解密 Resend API Key cipher。
+ */
+export function decryptResendApiKey(encrypted: string): string {
+  return decryptWithKey(encrypted, deriveResendKey());
+}
+
+// ── Hint builders ──
+
 /**
  * 构造前端展示用的密码提示，形如 `••••a4f1`。
- *
- * - 不依赖密钥派生，纯字符串处理；
- * - 不在任何场合返回明文，仅用于 UI 显示。
- * - 明文长度不足 4 时降级为 `••••`，避免泄漏短密码细节。
  */
 export function buildPasswordHint(plaintext: string): string {
   if (typeof plaintext !== "string" || plaintext.length < 4) return "••••";
   return `••••${plaintext.slice(-4)}`;
+}
+
+/**
+ * 构造 Resend API Key 展示提示，形如 `re_...a3Bf`。
+ */
+export function buildApiKeyHint(plaintext: string): string {
+  if (typeof plaintext !== "string" || plaintext.length < 8) return "re_••••";
+  return `${plaintext.slice(0, 3)}...${plaintext.slice(-4)}`;
 }

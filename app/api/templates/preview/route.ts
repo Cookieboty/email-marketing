@@ -6,6 +6,7 @@ import { PreviewTemplateSchema } from "@/lib/modules/template/schema";
 import { withLocalizedBuiltinText } from "@/lib/modules/template/render";
 import { sanitizeHtml } from "@/lib/modules/template/service";
 import { extractVariables, render } from "@/lib/template-engine";
+import { environmentVariableService } from "@/lib/modules/environment-variable/service";
 
 export const runtime = "nodejs";
 
@@ -16,6 +17,8 @@ export const runtime = "nodejs";
 export const POST = withAuth(async (_session, request: Request) => {
   if (!verifyOrigin(request.headers)) throw new ForbiddenError("Forbidden origin");
   const input = await parseJsonBody(request, PreviewTemplateSchema);
+  const envVars = await environmentVariableService.getVariablesMap();
+  const vars = { ...envVars, ...(input.variables ?? {}) };
   const subject = input.subject ?? "";
   const html = input.htmlContent ? sanitizeHtml(input.htmlContent) : "";
   const text = input.textContent ?? "";
@@ -23,16 +26,16 @@ export const POST = withAuth(async (_session, request: Request) => {
     unsubscribeUrl: input.unsubscribeUrl,
     unsubscribeTopicUrl: input.unsubscribeTopicUrl,
   });
-  const renderedSubject = render(subject, input.variables ?? {}, {
+  const renderedSubject = render(subject, vars, {
     missing: input.missingStrategy,
     builtin,
   });
-  const renderedHtml = render(html, input.variables ?? {}, {
+  const renderedHtml = render(html, vars, {
     missing: input.missingStrategy,
     builtin,
   });
   const renderedText = text
-    ? render(text, input.variables ?? {}, { missing: input.missingStrategy, builtin })
+    ? render(text, vars, { missing: input.missingStrategy, builtin })
     : null;
   const detectedVariables = Array.from(
     new Set([

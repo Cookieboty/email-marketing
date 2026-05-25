@@ -161,6 +161,16 @@ enum MailProviderType {
   SMTP
 }
 
+enum ResendConfigStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum SendingChannelStatus {
+  ACTIVE
+  DISABLED
+}
+
 // =====================================================================
 // 1. 用户域（7）
 // =====================================================================
@@ -415,6 +425,17 @@ model TemplateBlock {
   @@map("template_blocks")
 }
 
+model EnvironmentVariable {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("environment_variables")
+}
+
 // =====================================================================
 // 3. Campaign 与发送（3）
 // =====================================================================
@@ -442,6 +463,9 @@ model Campaign {
 
   topicId String?
   topic   Topic?  @relation(fields: [topicId], references: [id], onDelete: SetNull)
+
+  sendingChannelId String?
+  sendingChannel   SendingChannel? @relation(fields: [sendingChannelId], references: [id], onDelete: SetNull)
 
   isAbTest     Boolean @default(false)
   abTestConfig Json?
@@ -473,6 +497,7 @@ model Campaign {
   @@index([status, scheduledAt])
   @@index([templateId])
   @@index([topicId])
+  @@index([sendingChannelId])
   @@map("campaigns")
 }
 
@@ -920,6 +945,7 @@ model SmtpConfig {
   updatedBy String?
 
   activeFor MailProviderSetting[] @relation("MailProviderActiveSmtp")
+  channels  SendingChannel[]
 
   @@index([status])
   @@index([isDefault])
@@ -938,4 +964,51 @@ model MailProviderSetting {
   activeSmtp SmtpConfig? @relation("MailProviderActiveSmtp", fields: [activeSmtpId], references: [id], onDelete: Restrict)
 
   @@map("mail_provider_settings")
+}
+
+// =====================================================================
+// 10. Resend 配置 + 统一发件通道
+// =====================================================================
+
+model ResendConfig {
+  id           String             @id @default(cuid())
+  name         String
+  apiKeyCipher String
+  apiKeyHint   String?
+  status       ResendConfigStatus @default(ACTIVE)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  channels SendingChannel[]
+
+  @@index([status])
+  @@map("resend_configs")
+}
+
+model SendingChannel {
+  id           String              @id @default(cuid())
+  name         String
+  providerType MailProviderType
+
+  smtpConfigId   String?
+  smtpConfig     SmtpConfig?  @relation(fields: [smtpConfigId], references: [id], onDelete: Restrict)
+
+  resendConfigId String?
+  resendConfig   ResendConfig? @relation(fields: [resendConfigId], references: [id], onDelete: Restrict)
+
+  fromEmail String?
+  fromName  String?
+  replyTo   String?
+
+  isSystemDefault Boolean              @default(false)
+  status          SendingChannelStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@index([providerType, status])
+  @@index([isSystemDefault])
+  @@map("sending_channels")
 }

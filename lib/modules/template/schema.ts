@@ -121,5 +121,6 @@ export const TestSendSchema = z.object({
   to: z.string().trim().email("invalid email"),
   locale: LocaleSchema.optional(),
   variables: z.record(z.string(), z.string()).optional(),
+  channelId: z.string().optional(),
 });
 export type TestSendInput = z.infer<typeof TestSendSchema>;

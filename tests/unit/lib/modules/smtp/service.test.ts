@@ -126,7 +126,7 @@ import {
   testSmtpSend,
   checkSmtpDegradedAlert,
 } from "@/lib/modules/smtp/service";
-import { ConflictError, ForbiddenError, NotFoundError, RateLimitError, ValidationError } from "@/lib/errors";
+import { ConflictError, NotFoundError, RateLimitError, ValidationError } from "@/lib/errors";
 
 const ACTOR = { adminId: "admin_1", req: { headers: new Headers() } };
 const NOW = new Date("2026-05-20T00:00:00.000Z");
@@ -168,7 +168,6 @@ const baseRow = {
 };
 
 const DEFAULT_ENV = {
-  ADMIN_TEST_EMAILS: "qa@example.com, admin@example.com",
   RATE_LIMIT_TEST_SEND_MAX: 60,
   RATE_LIMIT_TEST_SEND_WINDOW_SEC: 3600,
   SMTP_FAILURE_THRESHOLD: 20,
@@ -599,19 +598,6 @@ describe("testSmtpSend", () => {
     subject: "ping",
     html: "<p>hi</p>",
   };
-
-  it("白名单未配置 → ForbiddenError", async () => {
-    envFn.mockReturnValue({ ...DEFAULT_ENV, ADMIN_TEST_EMAILS: "" });
-    await expect(testSmtpSend("smtp_1", sendInput, ACTOR)).rejects.toBeInstanceOf(ForbiddenError);
-    expect(findUnique).not.toHaveBeenCalled();
-  });
-
-  it("收件人不在白名单 → ForbiddenError", async () => {
-    await expect(
-      testSmtpSend("smtp_1", { ...sendInput, to: "hacker@evil.com" }, ACTOR),
-    ).rejects.toBeInstanceOf(ForbiddenError);
-    expect(findUnique).not.toHaveBeenCalled();
-  });
 
   it("限流触发 → RateLimitError", async () => {
     rlCheckFn.mockReturnValue({ allowed: false, retryAfterSec: 300 });

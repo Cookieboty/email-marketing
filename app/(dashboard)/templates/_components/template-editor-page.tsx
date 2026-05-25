@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import useSWR from "swr";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,8 +25,10 @@ import {
   apiDelete,
   apiPatch,
   apiPost,
+  swrFetcher,
 } from "@/lib/api-client";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
+import { swrKeys } from "@/lib/swr-keys";
 import {
   BUILTIN_VARIABLE_NAMES,
   extractVariables,
@@ -983,8 +986,93 @@ function VariablePanel({
           内置变量在预览中自动注入示例值，发送时由系统填充。
         </p>
       ) : null}
+      <AvailableVariablesRef />
     </div>
   );
+}
+
+const BUILTIN_DESCRIPTIONS: Record<string, string> = {
+  unsubscribe_url: "退订链接 URL",
+  unsubscribe_link: "退订链接（HTML <a> 标签）",
+  unsubscribe_topic_url: "主题退订链接 URL",
+  unsubscribe_topic_link: "主题退订链接（HTML <a> 标签）",
+  user_email: "收件人邮箱",
+  user_name: "收件人姓名",
+  campaign_name: "活动名称",
+  current_year: "当前年份",
+};
+
+function AvailableVariablesRef() {
+  const [expanded, setExpanded] = useState(false);
+  const { data } = useSWR<{ data: Array<{ key: string; value: string; description: string | null }> }>(
+    swrKeys.environmentVariables(),
+    swrFetcher,
+  );
+  const envVars = data?.data ?? [];
+
+  return (
+    <div className="border-t pt-3">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between text-xs font-medium text-muted-foreground hover:text-foreground"
+        onClick={() => setExpanded(!expanded)}
+      >
+        可用变量参考
+        <span className="text-[10px]">{expanded ? "收起" : "展开"}</span>
+      </button>
+      {expanded ? (
+        <div className="mt-2 space-y-3">
+          <div>
+            <span className="text-[10px] font-medium text-muted-foreground">内置变量</span>
+            <div className="mt-1 space-y-0.5">
+              {BUILTIN_VARIABLE_NAMES.map((name) => (
+                <VarRefItem key={name} name={name} description={BUILTIN_DESCRIPTIONS[name]} />
+              ))}
+            </div>
+          </div>
+          {envVars.length > 0 ? (
+            <div>
+              <span className="text-[10px] font-medium text-muted-foreground">环境变量</span>
+              <div className="mt-1 space-y-0.5">
+                {envVars.map((v) => (
+                  <VarRefItem key={v.key} name={v.key} description={v.description ?? undefined} />
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function VarRefItem({ name, description }: { name: string; description?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div
+      className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-muted"
+      onClick={() => {
+        navigator.clipboard.writeText(`{{${name}}}`);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+      title="点击复制"
+    >
+      <code className="text-[10px] font-medium">{`{{${name}}}`}</code>
+      {description ? (
+        <span className="text-[10px] text-muted-foreground">{description}</span>
+      ) : null}
+      {copied ? (
+        <span className="text-[10px] text-green-600">已复制</span>
+      ) : null}
+    </div>
+  );
+}
+
+interface UserOption {
+  id: string;
+  email: string;
+  name: string | null;
 }
 
 function TestSendDialog({
@@ -1002,11 +1090,30 @@ function TestSendDialog({
 }) {
   const { toast } = useToast();
   const [to, setTo] = useState("");
+  const [channelId, setChannelId] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [userSearch, setUserSearch] = useState("");
+  const debouncedUserSearch = useDebouncedValue(userSearch, 300);
+
+  const { data: channelsData } = useSWR<{ data: Array<{ id: string; name: string; providerType: string; status: string }> }>(
+    open ? "/api/sending-channels" : null,
+    swrFetcher,
+  );
+  const channels = (channelsData?.data ?? []).filter((c) => c.status === "ACTIVE");
+
+  const { data: usersData } = useSWR<{ data: UserOption[] }>(
+    open && debouncedUserSearch.length >= 1
+      ? `/api/users?q=${encodeURIComponent(debouncedUserSearch)}&pageSize=10`
+      : null,
+    swrFetcher,
+  );
+  const userOptions = usersData?.data ?? [];
 
   useEffect(() => {
     if (!open) {
       setTo("");
+      setChannelId("");
+      setUserSearch("");
       setSubmitting(false);
     }
   }, [open]);
@@ -1022,6 +1129,7 @@ function TestSendDialog({
         to: to.trim(),
         locale,
         variables,
+        ...(channelId ? { channelId } : {}),
       });
       toast({
         title: "已发送",
@@ -1050,7 +1158,7 @@ function TestSendDialog({
         <DialogHeader>
           <DialogTitle>测试发送</DialogTitle>
           <DialogDescription>
-            收件人必须配置在 <code>ADMIN_TEST_EMAILS</code> 白名单中。当前预览所用变量值会按 {LOCALE_LABELS[locale]} 版本一同发送。
+            当前预览所用变量值会按 {LOCALE_LABELS[locale]} 版本一同发送。
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
@@ -1060,10 +1168,42 @@ function TestSendDialog({
               id="test-send-to"
               type="email"
               value={to}
-              onChange={(e) => setTo(e.target.value)}
-              placeholder="admin@example.com"
+              onChange={(e) => { setTo(e.target.value); setUserSearch(e.target.value); }}
+              placeholder="搜索用户或输入邮箱"
               data-testid="template-test-send-to"
             />
+            {userOptions.length > 0 && userSearch.length >= 1 && to === userSearch && (
+              <ul className="max-h-40 overflow-y-auto rounded-md border bg-popover text-sm shadow-md">
+                {userOptions.map((u) => (
+                  <li key={u.id}>
+                    <button
+                      type="button"
+                      className="w-full px-3 py-1.5 text-left hover:bg-accent"
+                      onClick={() => { setTo(u.email); setUserSearch(""); }}
+                    >
+                      <span className="font-medium">{u.email}</span>
+                      {u.name ? <span className="ml-2 text-muted-foreground">{u.name}</span> : null}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="test-send-channel">发信渠道</Label>
+            <Select
+              id="test-send-channel"
+              value={channelId}
+              onChange={(e) => setChannelId(e.target.value)}
+              data-testid="template-test-send-channel"
+            >
+              <option value="">系统默认</option>
+              {channels.map((ch) => (
+                <option key={ch.id} value={ch.id}>
+                  {ch.name} ({ch.providerType})
+                </option>
+              ))}
+            </Select>
           </div>
         </div>
         <DialogFooter>

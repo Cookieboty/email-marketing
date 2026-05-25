@@ -30,6 +30,7 @@ export interface CampaignFormState {
   forcedLocale: Locale | "";
   fromEmail: string;
   replyTo: string;
+  sendingChannelId: string;
   tagFilter: string;
   tagFilterMode: "ANY" | "ALL";
   segmentId: string;
@@ -105,6 +106,7 @@ export interface CampaignPayload {
   forcedLocale?: Locale;
   fromEmail?: string;
   replyTo?: string;
+  sendingChannelId?: string;
   tagFilter?: string[];
   tagFilterMode?: "ANY" | "ALL";
   segmentId?: string;
@@ -253,6 +255,7 @@ export function buildCampaignPayload(
   }
   if (form.fromEmail.trim()) payload.fromEmail = form.fromEmail.trim();
   if (form.replyTo.trim()) payload.replyTo = form.replyTo.trim();
+  if (form.sendingChannelId) payload.sendingChannelId = form.sendingChannelId;
   if (tags.length > 0) {
     payload.tagFilter = tags;
     payload.tagFilterMode = form.tagFilterMode;

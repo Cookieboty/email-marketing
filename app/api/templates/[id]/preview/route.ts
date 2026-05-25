@@ -6,6 +6,7 @@ import { PreviewTemplateSchema } from "@/lib/modules/template/schema";
 import { templateService } from "@/lib/modules/template/service";
 import { withLocalizedBuiltinText } from "@/lib/modules/template/render";
 import { extractVariables, render } from "@/lib/template-engine";
+import { environmentVariableService } from "@/lib/modules/environment-variable/service";
 
 export const runtime = "nodejs";
 
@@ -29,6 +30,8 @@ export const POST = withAuth(async (_session, request: Request, ctx: Ctx) => {
     return NextResponse.json({ error: "MissingLocaleContent" }, { status: 400 });
   }
 
+  const envVars = await environmentVariableService.getVariablesMap();
+  const vars = { ...envVars, ...(input.variables ?? {}) };
   const subject = input.subject ?? baseLocale.subject;
   const html = input.htmlContent ?? baseLocale.htmlContent;
   const text = input.textContent ?? baseLocale.textContent ?? "";
@@ -37,9 +40,9 @@ export const POST = withAuth(async (_session, request: Request, ctx: Ctx) => {
     unsubscribeTopicUrl: input.unsubscribeTopicUrl,
   });
   const opts = { missing: input.missingStrategy, builtin };
-  const renderedSubject = render(subject, input.variables ?? {}, opts);
-  const renderedHtml = render(html, input.variables ?? {}, opts);
-  const renderedText = text ? render(text, input.variables ?? {}, opts) : null;
+  const renderedSubject = render(subject, vars, opts);
+  const renderedHtml = render(html, vars, opts);
+  const renderedText = text ? render(text, vars, opts) : null;
 
   const detectedVariables = Array.from(
     new Set([

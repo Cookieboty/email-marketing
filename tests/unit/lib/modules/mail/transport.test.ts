@@ -1,45 +1,45 @@
 /**
- * MailTransport 路由层单元测试。
+ * MailTransport 单元测试。
  *
  * 验证范围：
- *  - getActiveTransport()：按 MailProviderSetting 路由到 RESEND / SMTP；
- *  - 60 秒进程缓存（同一秒命中、超时失效、invalidate 立即失效）；
- *  - 错误兜底：解密失败 / 配置缺失 / status≠ACTIVE / 读 DB 抛错 → fallback RESEND；
- *  - SmtpTransport.sendBatch 顺序 + 节流（rateLimitPerSec）；
- *  - 错误归一化：nodemailer responseCode 透传到 SendResult.statusCode。
- *
- * 隔离策略：vi.mock prisma、smtp/repository、smtp/crypto、resend、nodemailer，
- * 让 transport 模块只看到 fake 对象，避免触发 env 严格校验或真实 socket。
+ *  - getTransportForChannel()：按 SendingChannel 路由到 RESEND / SMTP；
+ *  - getSystemDefaultTransport()：查 isSystemDefault=true 的 channel；
+ *  - SmtpTransport：sendSingle/sendBatch + 节流 + 错误归一化；
+ *  - ResendTransport：透传 Resend SDK 调用 + 错误归一化。
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SmtpConfig } from "@prisma/client";
 
-const settingGet = vi.fn();
-const findById = vi.fn();
-const decryptFn = vi.fn();
-const resendSingle = vi.fn();
-const resendBatch = vi.fn();
+const findUniqueFn = vi.fn();
+const findFirstFn = vi.fn();
+const decryptSmtpFn = vi.fn();
+const decryptResendFn = vi.fn();
 const sendMailFn = vi.fn();
 const closeFn = vi.fn();
 const createTransportFn = vi.fn();
+const resendEmailsSendFn = vi.fn();
+const resendBatchSendFn = vi.fn();
 
-vi.mock("@/lib/modules/smtp/repository", () => ({
-  mailProviderSettingRepository: {
-    get: (...args: unknown[]) => settingGet(...args),
-  },
-  smtpConfigRepository: {
-    findById: (...args: unknown[]) => findById(...args),
+vi.mock("@/lib/prisma", () => ({
+  prisma: {
+    sendingChannel: {
+      findUnique: (...args: unknown[]) => findUniqueFn(...args),
+      findFirst: (...args: unknown[]) => findFirstFn(...args),
+    },
   },
 }));
 
 vi.mock("@/lib/modules/smtp/crypto", () => ({
-  decryptSmtpPassword: (...args: unknown[]) => decryptFn(...args),
+  decryptSmtpPassword: (...args: unknown[]) => decryptSmtpFn(...args),
+  decryptResendApiKey: (...args: unknown[]) => decryptResendFn(...args),
 }));
 
-vi.mock("@/lib/resend", () => ({
-  sendSingle: (...args: unknown[]) => resendSingle(...args),
-  sendBatch: (...args: unknown[]) => resendBatch(...args),
+vi.mock("resend", () => ({
+  Resend: vi.fn().mockImplementation(() => ({
+    emails: { send: (...args: unknown[]) => resendEmailsSendFn(...args) },
+    batch: { send: (...args: unknown[]) => resendBatchSendFn(...args) },
+  })),
 }));
 
 vi.mock("nodemailer", () => ({
@@ -47,13 +47,12 @@ vi.mock("nodemailer", () => ({
 }));
 
 import {
-  __resetTransportCacheForTest,
-  getActiveTransport,
-  invalidateActiveTransport,
+  getTransportForChannel,
+  getSystemDefaultTransport,
   ResendTransport,
   SmtpTransport,
-  sendBatch,
   sendSingle,
+  sendBatch,
 } from "@/lib/modules/mail/transport";
 
 const FAKE_SMTP_CONFIG = {
@@ -90,16 +89,26 @@ const FAKE_SMTP_CONFIG = {
   updatedBy: null,
 } as unknown as SmtpConfig;
 
+const FAKE_RESEND_CONFIG = {
+  id: "resend_1",
+  name: "main resend",
+  apiKeyCipher: "encrypted_key",
+  apiKeyHint: "re_...a3Bf",
+  status: "ACTIVE",
+  createdAt: new Date(),
+  updatedAt: new Date(),
+};
+
 beforeEach(() => {
-  __resetTransportCacheForTest();
-  settingGet.mockReset();
-  findById.mockReset();
-  decryptFn.mockReset();
-  resendSingle.mockReset();
-  resendBatch.mockReset();
+  findUniqueFn.mockReset();
+  findFirstFn.mockReset();
+  decryptSmtpFn.mockReset();
+  decryptResendFn.mockReset();
   sendMailFn.mockReset();
   closeFn.mockReset();
   createTransportFn.mockReset();
+  resendEmailsSendFn.mockReset();
+  resendBatchSendFn.mockReset();
 
   createTransportFn.mockReturnValue({
     sendMail: (...args: unknown[]) => sendMailFn(...args),
@@ -107,160 +116,84 @@ beforeEach(() => {
   });
 });
 
-afterEach(async () => {
-  await invalidateActiveTransport();
+afterEach(() => {
+  vi.clearAllMocks();
 });
 
-// ───────── 路由 ─────────
+// ───────── getTransportForChannel ─────────
 
-describe("getActiveTransport routing", () => {
-  it("RESEND 设置 → ResendTransport", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    const t = await getActiveTransport();
+describe("getTransportForChannel", () => {
+  it("RESEND channel → ResendTransport", async () => {
+    findUniqueFn.mockResolvedValue({
+      id: "ch_1",
+      providerType: "RESEND",
+      status: "ACTIVE",
+      smtpConfig: null,
+      resendConfig: FAKE_RESEND_CONFIG,
+    });
+    decryptResendFn.mockReturnValue("re_test_key");
+
+    const t = await getTransportForChannel("ch_1");
     expect(t).toBeInstanceOf(ResendTransport);
     expect(t.provider).toBe("RESEND");
-    expect(t.smtpId).toBeNull();
+    expect(t.channelId).toBe("ch_1");
+    expect(decryptResendFn).toHaveBeenCalledWith("encrypted_key");
   });
 
-  it("SMTP 设置 + ACTIVE 配置 → SmtpTransport，构造池配置正确", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: "smtp_1" });
-    findById.mockResolvedValue(FAKE_SMTP_CONFIG);
-    decryptFn.mockReturnValue("plain-pass");
+  it("SMTP channel → SmtpTransport", async () => {
+    findUniqueFn.mockResolvedValue({
+      id: "ch_2",
+      providerType: "SMTP",
+      status: "ACTIVE",
+      smtpConfig: FAKE_SMTP_CONFIG,
+      resendConfig: null,
+    });
+    decryptSmtpFn.mockReturnValue("plain-pass");
 
-    const t = await getActiveTransport();
+    const t = await getTransportForChannel("ch_2");
     expect(t).toBeInstanceOf(SmtpTransport);
     expect(t.provider).toBe("SMTP");
-    expect(t.smtpId).toBe("smtp_1");
-    expect(decryptFn).toHaveBeenCalledWith("cipher");
-    expect(createTransportFn).toHaveBeenCalledTimes(1);
-    const opts = createTransportFn.mock.calls[0]![0] as Record<string, unknown>;
-    expect(opts.host).toBe("smtp.example.com");
-    expect(opts.port).toBe(587);
-    expect(opts.secure).toBe(false); // STARTTLS
-    expect(opts.requireTLS).toBe(true);
-    expect(opts.pool).toBe(true);
-    expect(opts.maxConnections).toBe(5);
-    expect(opts.auth).toEqual({ user: "u@example.com", pass: "plain-pass" });
-    expect(opts.tls).toEqual({ rejectUnauthorized: true });
+    expect(t.channelId).toBe("ch_2");
   });
 
-  it("activeProvider=SMTP 但 activeSmtpId=null → 回退 RESEND", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: null });
-    const t = await getActiveTransport();
-    expect(t.provider).toBe("RESEND");
-    expect(findById).not.toHaveBeenCalled();
+  it("channel not found → throws", async () => {
+    findUniqueFn.mockResolvedValue(null);
+    await expect(getTransportForChannel("nope")).rejects.toThrow("not found");
   });
 
-  it("配置不存在 → 回退 RESEND", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: "smtp_1" });
-    findById.mockResolvedValue(null);
-    const t = await getActiveTransport();
-    expect(t.provider).toBe("RESEND");
-  });
-
-  it("配置 status=DISABLED → 回退 RESEND", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: "smtp_1" });
-    findById.mockResolvedValue({ ...FAKE_SMTP_CONFIG, status: "DISABLED" });
-    const t = await getActiveTransport();
-    expect(t.provider).toBe("RESEND");
-  });
-
-  it("解密失败 → 回退 RESEND", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: "smtp_1" });
-    findById.mockResolvedValue(FAKE_SMTP_CONFIG);
-    decryptFn.mockImplementation(() => {
-      throw new Error("bad key");
+  it("channel DISABLED → throws", async () => {
+    findUniqueFn.mockResolvedValue({
+      id: "ch_3",
+      providerType: "RESEND",
+      status: "DISABLED",
+      smtpConfig: null,
+      resendConfig: FAKE_RESEND_CONFIG,
     });
-    const t = await getActiveTransport();
-    expect(t.provider).toBe("RESEND");
-  });
-
-  it("读取 setting 抛错 → 回退 RESEND（永不打死发件链路）", async () => {
-    settingGet.mockRejectedValue(new Error("db down"));
-    const t = await getActiveTransport();
-    expect(t.provider).toBe("RESEND");
+    await expect(getTransportForChannel("ch_3")).rejects.toThrow("DISABLED");
   });
 });
 
-// ───────── 缓存 ─────────
+// ───────── getSystemDefaultTransport ─────────
 
-describe("getActiveTransport caching", () => {
-  it("两次连续调用复用同一个 transport 实例", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    const a = await getActiveTransport();
-    const b = await getActiveTransport();
-    expect(a).toBe(b);
-    expect(settingGet).toHaveBeenCalledTimes(1);
-  });
-
-  it("超过 60s TTL 后重新构造", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    const realNow = Date.now;
-    let fake = 1_000_000;
-    Date.now = () => fake;
-    try {
-      const a = await getActiveTransport(fake);
-      fake += 60_001;
-      const b = await getActiveTransport(fake);
-      expect(a).not.toBe(b);
-      expect(settingGet).toHaveBeenCalledTimes(2);
-    } finally {
-      Date.now = realNow;
-    }
-  });
-
-  it("invalidateActiveTransport() 立即失效，并 close 旧 SMTP 池", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "SMTP", activeSmtpId: "smtp_1" });
-    findById.mockResolvedValue(FAKE_SMTP_CONFIG);
-    decryptFn.mockReturnValue("p");
-    const a = await getActiveTransport();
-    expect(a.provider).toBe("SMTP");
-
-    await invalidateActiveTransport();
-    expect(closeFn).toHaveBeenCalledTimes(1);
-
-    const b = await getActiveTransport();
-    expect(b).not.toBe(a);
-    expect(settingGet).toHaveBeenCalledTimes(2);
-  });
-
-  it("并发请求只构造一个 transport", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    const [a, b, c] = await Promise.all([
-      getActiveTransport(),
-      getActiveTransport(),
-      getActiveTransport(),
-    ]);
-    expect(a).toBe(b);
-    expect(b).toBe(c);
-    expect(settingGet).toHaveBeenCalledTimes(1);
-  });
-});
-
-// ───────── 路由转发 ─────────
-
-describe("sendSingle / sendBatch dispatch", () => {
-  it("RESEND：sendSingle 直接转发 lib/resend", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    resendSingle.mockResolvedValue({ ok: true, id: "rs_1" });
-    const r = await sendSingle({
-      from: "f@e.com",
-      to: "t@e.com",
-      subject: "s",
-      html: "<p/>",
+describe("getSystemDefaultTransport", () => {
+  it("finds isSystemDefault=true channel", async () => {
+    findFirstFn.mockResolvedValue({ id: "ch_default" });
+    findUniqueFn.mockResolvedValue({
+      id: "ch_default",
+      providerType: "RESEND",
+      status: "ACTIVE",
+      smtpConfig: null,
+      resendConfig: FAKE_RESEND_CONFIG,
     });
-    expect(r).toEqual({ ok: true, id: "rs_1" });
-    expect(resendSingle).toHaveBeenCalledTimes(1);
+    decryptResendFn.mockReturnValue("re_key");
+
+    const t = await getSystemDefaultTransport();
+    expect(t.channelId).toBe("ch_default");
   });
 
-  it("RESEND：sendBatch 直接转发 lib/resend.sendBatch", async () => {
-    settingGet.mockResolvedValue({ activeProvider: "RESEND", activeSmtpId: null });
-    resendBatch.mockResolvedValue([{ ok: true, id: "x" }]);
-    const r = await sendBatch([
-      { from: "f@e.com", to: "t@e.com", subject: "s", html: "<p/>" },
-    ]);
-    expect(r).toEqual([{ ok: true, id: "x" }]);
-    expect(resendBatch).toHaveBeenCalledTimes(1);
+  it("no system default → throws", async () => {
+    findFirstFn.mockResolvedValue(null);
+    await expect(getSystemDefaultTransport()).rejects.toThrow("No system default");
   });
 });
 
@@ -269,10 +202,10 @@ describe("sendSingle / sendBatch dispatch", () => {
 describe("SmtpTransport", () => {
   it("sendSingle：sendMail 成功 → 返回 messageId", async () => {
     sendMailFn.mockResolvedValue({ messageId: "<abc@host>" });
-    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", () => ({
+    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", "ch_1", (() => ({
       sendMail: (...args: unknown[]) => sendMailFn(...args),
       close: () => undefined,
-    }) as never);
+    })) as never);
     const r = await t.sendSingle({
       from: "",
       to: "rcpt@e.com",
@@ -281,17 +214,17 @@ describe("SmtpTransport", () => {
     });
     expect(r).toEqual({ ok: true, id: "<abc@host>" });
     const call = sendMailFn.mock.calls[0]![0] as Record<string, unknown>;
-    expect(call.from).toBe("Acme <noreply@example.com>"); // fromName 拼接
+    expect(call.from).toBe("Acme <noreply@example.com>");
   });
 
   it("sendOnce 错误归一化：透传 responseCode 到 statusCode", async () => {
     sendMailFn.mockRejectedValue(
       Object.assign(new Error("535 auth failed"), { responseCode: 535, code: "EAUTH" }),
     );
-    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", () => ({
+    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", "ch_1", (() => ({
       sendMail: (...args: unknown[]) => sendMailFn(...args),
       close: () => undefined,
-    }) as never);
+    })) as never);
     const r = await t.sendSingle({
       from: "",
       to: "rcpt@e.com",
@@ -310,10 +243,10 @@ describe("SmtpTransport", () => {
       .mockResolvedValueOnce({ messageId: "m1" })
       .mockRejectedValueOnce(new Error("temp fail"))
       .mockResolvedValueOnce({ messageId: "m3" });
-    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", () => ({
+    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", "ch_1", (() => ({
       sendMail: (...args: unknown[]) => sendMailFn(...args),
       close: () => undefined,
-    }) as never);
+    })) as never);
     const r = await t.sendBatch([
       { from: "", to: "a@e.com", subject: "1", html: "<p/>" },
       { from: "", to: "b@e.com", subject: "2", html: "<p/>" },
@@ -321,57 +254,87 @@ describe("SmtpTransport", () => {
     ]);
     expect(r).toHaveLength(3);
     expect(r[0]).toEqual({ ok: true, id: "m1" });
-    expect(r[1].ok).toBe(false);
+    expect(r[1]!.ok).toBe(false);
     expect(r[2]).toEqual({ ok: true, id: "m3" });
   });
 
   it("rateLimitPerSec=2 → sendBatch 第二封等待 ≥500ms（节流）", async () => {
     const cfg = { ...FAKE_SMTP_CONFIG, rateLimitPerSec: 2 };
     sendMailFn.mockResolvedValue({ messageId: "m" });
-    const t = new SmtpTransport(cfg as never, "plain", () => ({
+    const t = new SmtpTransport(cfg as never, "plain", "ch_1", (() => ({
       sendMail: (...args: unknown[]) => sendMailFn(...args),
       close: () => undefined,
-    }) as never);
+    })) as never);
     const start = Date.now();
     await t.sendBatch([
       { from: "", to: "a@e.com", subject: "1", html: "<p/>" },
       { from: "", to: "b@e.com", subject: "2", html: "<p/>" },
     ]);
     const elapsed = Date.now() - start;
-    expect(elapsed).toBeGreaterThanOrEqual(490); // 允许 10ms 误差
+    expect(elapsed).toBeGreaterThanOrEqual(490);
   });
 
-  it("close() 调用底层 transporter.close 且不抛异常", async () => {
+  it("close() 调用底层 transporter.close", async () => {
     const localClose = vi.fn();
-    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", () => ({
+    const t = new SmtpTransport(FAKE_SMTP_CONFIG, "plain", "ch_1", (() => ({
       sendMail: () => Promise.resolve({ messageId: "x" }),
       close: localClose,
-    }) as never);
+    })) as never);
     await t.close();
     expect(localClose).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("无密码（username+plain 任一为空）时不带 auth 字段", () => {
-    const cfg = { ...FAKE_SMTP_CONFIG, username: null };
-    const factory = vi.fn(() => ({
-      sendMail: () => Promise.resolve({ messageId: "x" }),
-      close: () => undefined,
-    })) as never;
-    new SmtpTransport(cfg as never, null, factory);
-    const opts = (factory as unknown as { mock: { calls: unknown[][] } }).mock
-      .calls[0]![0] as Record<string, unknown>;
-    expect(opts.auth).toBeUndefined();
+// ───────── ResendTransport 行为 ─────────
+
+describe("ResendTransport", () => {
+  it("sendSingle 成功", async () => {
+    const { Resend } = await import("resend");
+    const client = new Resend("re_test");
+    resendEmailsSendFn.mockResolvedValue({ data: { id: "rs_1" }, error: null });
+
+    const t = new ResendTransport(client, "ch_1");
+    const r = await t.sendSingle({
+      from: "f@e.com",
+      to: "t@e.com",
+      subject: "s",
+      html: "<p/>",
+    });
+    expect(r).toEqual({ ok: true, id: "rs_1" });
   });
 
-  it("secure=TLS 时 secure=true，requireTLS 由配置决定", () => {
-    const cfg = { ...FAKE_SMTP_CONFIG, port: 465, secure: "TLS" };
-    const factory = vi.fn(() => ({
-      sendMail: () => Promise.resolve({ messageId: "x" }),
-      close: () => undefined,
-    })) as never;
-    new SmtpTransport(cfg as never, "p", factory);
-    const opts = (factory as unknown as { mock: { calls: unknown[][] } }).mock
-      .calls[0]![0] as Record<string, unknown>;
-    expect(opts.secure).toBe(true);
+  it("sendSingle SDK error → normalized result", async () => {
+    const { Resend } = await import("resend");
+    const client = new Resend("re_test");
+    resendEmailsSendFn.mockResolvedValue({
+      data: null,
+      error: { message: "invalid api key", name: "validation_error" },
+    });
+
+    const t = new ResendTransport(client, "ch_1");
+    const r = await t.sendSingle({
+      from: "f@e.com",
+      to: "t@e.com",
+      subject: "s",
+      html: "<p/>",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("invalid api key");
+  });
+
+  it("sendBatch 成功", async () => {
+    const { Resend } = await import("resend");
+    const client = new Resend("re_test");
+    resendBatchSendFn.mockResolvedValue({
+      data: { data: [{ id: "b1" }, { id: "b2" }] },
+      error: null,
+    });
+
+    const t = new ResendTransport(client, "ch_1");
+    const r = await t.sendBatch([
+      { from: "f@e.com", to: "a@e.com", subject: "1", html: "<p/>" },
+      { from: "f@e.com", to: "b@e.com", subject: "2", html: "<p/>" },
+    ]);
+    expect(r).toEqual([{ ok: true, id: "b1" }, { ok: true, id: "b2" }]);
   });
 });

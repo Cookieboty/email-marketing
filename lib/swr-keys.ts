@@ -160,4 +160,7 @@ export const swrKeys = {
     const qs = sp.toString();
     return qs ? `${base}?${qs}` : base;
   },
+  resendConfigs: () => "/api/resend-configs",
+  sendingChannels: () => "/api/sending-channels",
+  environmentVariables: () => "/api/environment-variables",
 };

@@ -27,7 +27,6 @@ import { normalizeEmail } from "@/lib/email-utils";
 import { getRateLimiter } from "@/lib/rate-limit";
 import {
   ConflictError,
-  ForbiddenError,
   NotFoundError,
   RateLimitError,
   ValidationError,
@@ -56,17 +55,6 @@ import {
   verifySmtpConnection,
   SmtpTransport,
 } from "@/lib/modules/mail/transport";
-
-/** 解析 ADMIN_TEST_EMAILS（逗号分隔），返回归一化后的 Set。 */
-function getAdminTestWhitelist(): Set<string> {
-  const raw = env().ADMIN_TEST_EMAILS ?? "";
-  const list = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => normalizeEmail(s));
-  return new Set(list);
-}
 
 const ENTITY = "SmtpConfig" as const;
 const PROVIDER_ENTITY = "MailProviderSetting" as const;
@@ -653,7 +641,6 @@ function getSmtpTestSendLimiter() {
 /**
  * 用指定 SmtpConfig 真实发送一封测试邮件。
  *
- * - 收件人必须在 ADMIN_TEST_EMAILS 白名单内；
  * - 受 RATE_LIMIT_TEST_SEND_* 限流；
  * - 走一次性 SmtpTransport（不污染 transport 缓存），用完关闭；
  * - 成功 → recordSendSuccess；失败 → recordSendFailure；
@@ -664,14 +651,7 @@ export async function testSmtpSend(
   input: TestSendInput,
   actor: { adminId: string; req?: { headers: Headers } | null },
 ): Promise<SmtpTestSendResult> {
-  const whitelist = getAdminTestWhitelist();
-  if (whitelist.size === 0) {
-    throw new ForbiddenError("Test send is disabled (ADMIN_TEST_EMAILS not configured)");
-  }
   const target = normalizeEmail(input.to);
-  if (!whitelist.has(target)) {
-    throw new ForbiddenError("目标邮箱不在 ADMIN_TEST_EMAILS 白名单内");
-  }
 
   const limiter = getSmtpTestSendLimiter();
   const decision = limiter.check(`${SMTP_TEST_SEND_RL}:${actor.adminId}`);

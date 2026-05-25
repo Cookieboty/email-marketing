@@ -10,7 +10,7 @@
  */
 
 export const SESSION_COOKIE_NAME = "ems_session";
-export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 12;
+export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 
 export interface SessionPayload {
   sessionId: string;

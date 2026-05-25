@@ -5,7 +5,16 @@ import { useState } from "react";
 import useSWR from "swr";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
@@ -26,6 +35,19 @@ import {
   type TemplateListItem,
   type TemplateRecord,
 } from "./types";
+
+interface SendingChannelOption {
+  id: string;
+  name: string;
+  providerType: "RESEND" | "SMTP";
+  status: string;
+}
+
+interface UserOption {
+  id: string;
+  email: string;
+  name: string | null;
+}
 
 interface ListResp {
   data: TemplateListItem[];
@@ -78,6 +100,50 @@ export default function TemplatesListPage() {
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<TemplateListItem | null>(null);
+
+  const [testTarget, setTestTarget] = useState<TemplateListItem | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const [testLocale, setTestLocale] = useState<Locale>("zh");
+  const [testChannelId, setTestChannelId] = useState("");
+  const [testSending, setTestSending] = useState(false);
+  const [testUserSearch, setTestUserSearch] = useState("");
+  const debouncedTestUserSearch = useDebouncedValue(testUserSearch, 300);
+
+  const { data: channelsData } = useSWR<{ data: SendingChannelOption[] }>(
+    testTarget ? "/api/sending-channels" : null,
+    swrFetcher,
+  );
+  const channels = (channelsData?.data ?? []).filter((c) => c.status === "ACTIVE");
+
+  const { data: testUsersData } = useSWR<{ data: UserOption[] }>(
+    testTarget && debouncedTestUserSearch.length >= 1
+      ? `/api/users?q=${encodeURIComponent(debouncedTestUserSearch)}&pageSize=10`
+      : null,
+    swrFetcher,
+  );
+  const testUserOptions = testUsersData?.data ?? [];
+
+  async function onTestSend() {
+    if (!testTarget || !testTo.trim()) return;
+    setTestSending(true);
+    try {
+      await apiPost(`/api/templates/${testTarget.id}/test-send`, {
+        to: testTo.trim(),
+        locale: testLocale,
+        ...(testChannelId ? { channelId: testChannelId } : {}),
+      });
+      toast({ title: "测试邮件已发送" });
+      setTestTarget(null);
+    } catch (e) {
+      toast({
+        title: "发送失败",
+        description: asMessage(e),
+        variant: "destructive",
+      });
+    } finally {
+      setTestSending(false);
+    }
+  }
 
   const total = data?.total ?? 0;
   const items = data?.data ?? [];
@@ -302,6 +368,22 @@ export default function TemplatesListPage() {
                   variant="outline"
                   size="sm"
                   disabled={busyId === t.id}
+                  onClick={() => {
+                    setTestTarget(t);
+                    setTestTo("");
+                    setTestLocale(t.defaultLocale);
+                    setTestChannelId("");
+                    setTestUserSearch("");
+                  }}
+                  data-testid={`template-test-send-${t.id}`}
+                >
+                  测试发送
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busyId === t.id}
                   onClick={() => onDuplicate(t)}
                   data-testid={`template-duplicate-${t.id}`}
                 >
@@ -373,6 +455,90 @@ export default function TemplatesListPage() {
           }
         }}
       />
+
+      <Dialog
+        open={testTarget !== null}
+        onOpenChange={(o) => { if (!o) setTestTarget(null); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>测试发送</DialogTitle>
+            <DialogDescription>
+              向白名单收件人发送「{testTarget?.name}」的测试邮件。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="tpl-test-to">收件人</Label>
+              <Input
+                id="tpl-test-to"
+                type="email"
+                value={testTo}
+                onChange={(e) => { setTestTo(e.target.value); setTestUserSearch(e.target.value); }}
+                placeholder="搜索用户或输入邮箱"
+              />
+              {testUserOptions.length > 0 && testUserSearch.length >= 1 && testTo === testUserSearch && (
+                <ul className="max-h-40 overflow-y-auto rounded-md border bg-popover text-sm shadow-md">
+                  {testUserOptions.map((u) => (
+                    <li key={u.id}>
+                      <button
+                        type="button"
+                        className="w-full px-3 py-1.5 text-left hover:bg-accent"
+                        onClick={() => { setTestTo(u.email); setTestUserSearch(""); }}
+                      >
+                        <span className="font-medium">{u.email}</span>
+                        {u.name ? <span className="ml-2 text-muted-foreground">{u.name}</span> : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="tpl-test-locale">语言版本</Label>
+              <Select
+                id="tpl-test-locale"
+                value={testLocale}
+                onChange={(e) => setTestLocale(e.target.value as Locale)}
+              >
+                {(testTarget?.availableLocales ?? TEMPLATE_LOCALES).map((l) => (
+                  <option key={l} value={l}>{LOCALE_LABELS[l]}</option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="tpl-test-channel">发信渠道</Label>
+              <Select
+                id="tpl-test-channel"
+                value={testChannelId}
+                onChange={(e) => setTestChannelId(e.target.value)}
+              >
+                <option value="">系统默认</option>
+                {channels.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    {ch.name} ({ch.providerType})
+                  </option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setTestTarget(null)}
+              disabled={testSending}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={onTestSend}
+              disabled={testSending || !testTo.trim()}
+            >
+              {testSending ? "发送中..." : "发送"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

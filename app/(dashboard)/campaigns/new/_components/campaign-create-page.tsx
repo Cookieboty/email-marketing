@@ -76,6 +76,7 @@ const INITIAL: CampaignFormState = {
   forcedLocale: "",
   fromEmail: "",
   replyTo: "",
+  sendingChannelId: "",
   tagFilter: "",
   tagFilterMode: "ANY",
   segmentId: "",
@@ -110,6 +111,14 @@ export default function CampaignCreatePage() {
   const { data: segments } = useSWR<{ data: SegmentOption[] }>(
     "/api/segments?pageSize=100",
     swrFetcher,
+  );
+  const { data: channelsData } = useSWR<{ data: Array<{ id: string; name: string; providerType: string; fromEmail: string; status: string }> }>(
+    "/api/sending-channels",
+    swrFetcher,
+  );
+  const activeChannels = useMemo(
+    () => channelsData?.data?.filter((c) => c.status === "ACTIVE") ?? [],
+    [channelsData],
   );
 
   const selectedTemplate = useMemo<TemplateOption | null>(() => {
@@ -359,12 +368,27 @@ export default function CampaignCreatePage() {
               ) : null}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>发件通道 *</Label>
+                <Select
+                  value={form.sendingChannelId}
+                  onChange={(e) => upd({ sendingChannelId: e.target.value })}
+                  data-testid="select-channel"
+                >
+                  <option value="">请选择发件通道</option>
+                  {activeChannels.map((ch) => (
+                    <option key={ch.id} value={ch.id}>
+                      {ch.name} ({ch.providerType} - {ch.fromEmail})
+                    </option>
+                  ))}
+                </Select>
+              </div>
               <div className="space-y-1.5">
                 <Label>发件人邮箱</Label>
                 <Input
                   value={form.fromEmail}
                   onChange={(e) => upd({ fromEmail: e.target.value })}
-                  placeholder="留空使用默认"
+                  placeholder="留空使用通道默认"
                   data-testid="input-from"
                 />
               </div>

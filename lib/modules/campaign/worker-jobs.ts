@@ -1,7 +1,7 @@
 import type { CampaignStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
-import { sendBatch, sendSingle, type SendEmailInput } from "@/lib/modules/mail/transport";
+import { getTransportForChannel, sendSingle, type SendEmailInput } from "@/lib/modules/mail/transport";
 import { logger } from "@/lib/logger";
 import { isSuppressed } from "@/lib/modules/suppression/check";
 import { isOverLimit } from "@/lib/modules/frequency/check";
@@ -11,6 +11,7 @@ import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
 import { campaignService } from "./service";
 import { snapshotRecipients } from "./snapshot";
 import { transformHtml } from "./html-transform";
+import { environmentVariableService } from "@/lib/modules/environment-variable/service";
 
 const log = logger.child("worker-jobs");
 const SYSTEM_CTX = { actorType: "SYSTEM" as const, req: null };
@@ -56,14 +57,24 @@ export async function scheduledCampaignTrigger(): Promise<void> {
 
 export async function processSendQueue(): Promise<void> {
   const campaigns = await prisma.campaign.findMany({
-    where: { status: "SENDING" },
+    where: { status: { in: ["SENDING", "AB_TESTING"] } },
     orderBy: { createdAt: "asc" },
     take: 1,
-    include: { variants: true, topic: true },
+    include: {
+      variants: true,
+      topic: true,
+      sendingChannel: { include: { smtpConfig: true, resendConfig: true } },
+    },
   });
 
   if (campaigns.length === 0) return;
   const campaign = campaigns[0]!;
+
+  if (!campaign.sendingChannelId) {
+    log.error("campaign missing sendingChannelId, cannot send", { campaignId: campaign.id });
+    return;
+  }
+
   const e = env();
   const appUrl = e.APP_URL ?? "";
   const secret = e.SESSION_SECRET ?? "";
@@ -109,6 +120,8 @@ export async function processSendQueue(): Promise<void> {
   const emails: SendEmailInput[] = [];
   const recipientMap: Array<{ recipientId: string; userId: string }> = [];
 
+  const envVars = await environmentVariableService.getVariablesMap();
+
   for (const r of recipients) {
     try {
       const unsubscribeUrl = `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}`;
@@ -133,6 +146,7 @@ export async function processSendQueue(): Promise<void> {
             textContents: r.variant.textContents as Record<string, string | null> | undefined,
           } satisfies TemplateVariantContent)
           : null,
+        variables: envVars,
         builtin,
       });
       const finalHtml = transformHtml(rendered.html, {
@@ -150,12 +164,15 @@ export async function processSendQueue(): Promise<void> {
         headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click";
       }
 
+      const channelReplyTo = campaign.sendingChannel?.replyTo ?? undefined;
+
       emails.push({
         from: campaign.fromEmail,
         to: r.user.email,
         subject: rendered.subject,
         html: finalHtml,
         ...(rendered.text ? { text: rendered.text } : {}),
+        ...(campaign.replyTo || channelReplyTo ? { replyTo: campaign.replyTo ?? channelReplyTo } : {}),
         headers: Object.keys(headers).length > 0 ? headers : undefined,
         tags: [
           { name: "campaign_id", value: campaign.id },
@@ -188,7 +205,24 @@ export async function processSendQueue(): Promise<void> {
 
   if (emails.length === 0) return;
 
-  const results = await sendBatch(emails);
+  let transport;
+  try {
+    transport = await getTransportForChannel(campaign.sendingChannelId);
+  } catch (err) {
+    log.error("failed to build transport for channel", {
+      campaignId: campaign.id,
+      channelId: campaign.sendingChannelId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  let results;
+  try {
+    results = await transport.sendBatch(emails);
+  } finally {
+    await transport.close();
+  }
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
@@ -246,13 +280,13 @@ export async function abTestEvaluator(): Promise<void> {
   for (const campaign of campaigns) {
     try {
       const config = campaign.abTestConfig as {
-        waitHours?: number;
-        winnerCriteria?: string;
-        autoSend?: boolean;
+        testDurationHours?: number;
+        winnerMetric?: string;
+        autoSendWinner?: boolean;
       } | null;
-      if (!config?.waitHours) continue;
+      if (!config?.testDurationHours) continue;
 
-      const waitUntil = new Date(campaign.updatedAt.getTime() + config.waitHours * 3600_000);
+      const waitUntil = new Date(campaign.updatedAt.getTime() + config.testDurationHours * 3600_000);
       if (new Date() < waitUntil) continue;
 
       const variantStats = await Promise.all(
@@ -266,7 +300,7 @@ export async function abTestEvaluator(): Promise<void> {
         }),
       );
 
-      const metric = config.winnerCriteria === "CLICK_RATE" ? "clickRate" : "openRate";
+      const metric = config.winnerMetric === "click" ? "clickRate" : "openRate";
       variantStats.sort((a, b) => b[metric] - a[metric]);
       const winnerId = variantStats[0]?.variantId;
 
@@ -277,7 +311,7 @@ export async function abTestEvaluator(): Promise<void> {
         });
       }
 
-      if (config.autoSend && winnerId) {
+      if (config.autoSendWinner && winnerId) {
         await prisma.campaignRecipient.updateMany({
           where: { campaignId: campaign.id, variantId: null, status: "PENDING" },
           data: { variantId: winnerId },
@@ -346,6 +380,8 @@ export async function automationRunProcessor(): Promise<void> {
     take: 50,
   });
 
+  const autoEnvVars = runs.length > 0 ? await environmentVariableService.getVariablesMap() : {};
+
   for (const run of runs) {
     try {
       if (run.user.totalBounceCount >= 3) {
@@ -388,6 +424,7 @@ export async function automationRunProcessor(): Promise<void> {
       const rendered = renderSnapshotContent({
         snapshot: run.templateSnapshot as unknown as TemplateSnapshot,
         resolvedLocale: run.resolvedLocale,
+        variables: autoEnvVars,
         builtin,
       });
 

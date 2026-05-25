@@ -32,6 +32,7 @@ import {
   type LocaleCoverageResult,
 } from "./locale-coverage";
 import { campaignRepository, type ListCampaignsResult } from "./repository";
+import { snapshotRecipients } from "./snapshot";
 import {
   assertTransition,
   isTerminal,
@@ -170,6 +171,7 @@ export const campaignService = {
       forcedLocale: input.forcedLocale ?? null,
       fromEmail,
       replyTo: input.replyTo ?? null,
+      sendingChannelId: input.sendingChannelId ?? null,
       templateId: tpl.id,
       templateSnapshot: buildTemplateSnapshot(tpl) as unknown as Prisma.InputJsonValue,
       segmentId: input.segmentId ?? null,
@@ -244,6 +246,7 @@ export const campaignService = {
     if (input.forcedLocale !== undefined) data.forcedLocale = input.forcedLocale ?? null;
     if (input.fromEmail !== undefined) data.fromEmail = input.fromEmail;
     if (input.replyTo !== undefined) data.replyTo = input.replyTo ?? null;
+    if (input.sendingChannelId !== undefined) data.sendingChannelId = input.sendingChannelId ?? null;
     if (input.tagFilter !== undefined) data.tagFilter = input.tagFilter;
     if (input.tagFilterMode !== undefined) data.tagFilterMode = input.tagFilterMode;
     if (input.segmentId !== undefined) data.segmentId = input.segmentId ?? null;
@@ -359,6 +362,10 @@ export const campaignService = {
     const existing = await campaignRepository.findById(id);
     if (!existing) throw new NotFoundError("Campaign not found");
 
+    if (!existing.sendingChannelId) {
+      throw new ValidationError("sendingChannelId is required before sending");
+    }
+
     // 带 scheduledAt 时按 schedule 处理（仅 DRAFT 适用，简化语义）
     if (input.scheduledAt) {
       if (existing.status !== "DRAFT") {
@@ -385,7 +392,41 @@ export const campaignService = {
     const reason: CampaignTransitionReason = existing.isAbTest
       ? "ab_test_start"
       : "send";
-    return this._transition(id, existing.status, next, reason, {}, ctx);
+
+    const campaign = await prisma.campaign.findUnique({
+      where: { id },
+      include: { segment: true, variants: true },
+    });
+    if (!campaign) throw new NotFoundError("Campaign not found");
+
+    await prisma.$transaction(async (tx) => {
+      await snapshotRecipients(campaign, tx);
+      const count = await campaignRepository.transitionStatus(
+        id,
+        existing.status,
+        next,
+        {},
+        tx,
+      );
+      if (count === 0) {
+        throw new ConflictError(
+          `Campaign status changed concurrently (expected ${existing.status})`,
+        );
+      }
+    });
+
+    const fresh = await campaignRepository.findById(id);
+    if (!fresh) throw new NotFoundError("Campaign not found after transition");
+
+    audit({
+      action: `campaign.${reason}`,
+      entityType: "Campaign",
+      entityId: id,
+      actorType: ctx.actorType,
+      details: { from: existing.status, to: next },
+      req: ctx.req ?? null,
+    });
+    return fresh;
   },
 
   async pause(id: string, ctx: ActorContext): Promise<Campaign> {
