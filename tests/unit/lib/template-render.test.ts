@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderSnapshotContent, resolveLocale } from "@/lib/modules/template/render";
 import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
+import { BlockExpansionError, type BlockResolver } from "@/lib/template-engine";
 
 describe("resolveLocale", () => {
   it("uses the user locale when AUTO and the template has that locale", () => {
@@ -200,5 +201,87 @@ describe("renderSnapshotContent", () => {
     });
 
     expect(out.html).toContain(">Unsubscribe from this topic</a>");
+  });
+});
+
+describe("renderSnapshotContent: block expansion", () => {
+  const withBlocks: TemplateSnapshot = {
+    version: 1,
+    defaultLocale: "zh",
+    variables: ["name"],
+    locales: {
+      zh: {
+        subject: "你好 {{name}}",
+        htmlContent: "<main>{{name}} {{> footer}}</main>",
+        textContent: "你好 {{name}} {{> footer}}",
+      },
+    },
+  };
+
+  const resolver = (map: Record<string, string>): BlockResolver => ({
+    get: (n) => (Object.prototype.hasOwnProperty.call(map, n) ? map[n]! : null),
+  });
+
+  it("zero-overhead path: no resolver leaves block markers untouched in stage 1, vars still render", () => {
+    // 不传 blocks resolver：subject 没有引用，html 中 `{{> footer}}` 直接当字面量进入
+    // render，因 VAR_RE 是 `{{(\w+)}}`，不会误匹配 `{{> footer}}`，故按字面量保留。
+    const out = renderSnapshotContent({
+      snapshot: withBlocks,
+      resolvedLocale: "zh",
+      variables: { name: "Alice" },
+      builtin: {},
+    });
+    expect(out.html).toBe("<main>Alice {{> footer}}</main>");
+    expect(out.text).toBe("你好 Alice {{> footer}}");
+  });
+
+  it("expands block then renders variables (depth-first across both stages)", () => {
+    const out = renderSnapshotContent({
+      snapshot: withBlocks,
+      resolvedLocale: "zh",
+      variables: { name: "Alice" },
+      builtin: {},
+      blocks: resolver({ footer: "<small>{{name}} bye</small>" }),
+    });
+    // 1) Stage1: footer 插回 HTML：<main>{{name}} <small>{{name}} bye</small></main>
+    // 2) Stage2: 变量 name=Alice 替换两处
+    expect(out.html).toBe("<main>Alice <small>Alice bye</small></main>");
+  });
+
+  it("propagates BlockExpansionError(CYCLE) when resolver yields a self-reference", () => {
+    expect(() =>
+      renderSnapshotContent({
+        snapshot: withBlocks,
+        resolvedLocale: "zh",
+        variables: { name: "Alice" },
+        builtin: {},
+        blocks: resolver({ footer: "{{> footer}}" }),
+      }),
+    ).toThrow(BlockExpansionError);
+  });
+
+  it("missingBlock='throw' surfaces missing block as BlockExpansionError", () => {
+    expect(() =>
+      renderSnapshotContent({
+        snapshot: withBlocks,
+        resolvedLocale: "zh",
+        variables: { name: "Alice" },
+        builtin: {},
+        blocks: resolver({}), // 没有 footer
+        missingBlock: "throw",
+      }),
+    ).toThrow(BlockExpansionError);
+  });
+
+  it("missingBlock='keep' preserves the unresolved ref through stage 2", () => {
+    const out = renderSnapshotContent({
+      snapshot: withBlocks,
+      resolvedLocale: "zh",
+      variables: { name: "Alice" },
+      builtin: {},
+      blocks: resolver({}),
+      missingBlock: "keep",
+    });
+    expect(out.html).toBe("<main>Alice {{> footer}}</main>");
   });
 });

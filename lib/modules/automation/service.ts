@@ -10,6 +10,7 @@ import {
   buildTemplateSnapshot,
   type TemplateSnapshot,
 } from "@/lib/modules/template/snapshot";
+import { freezeBlocksForSnapshot } from "@/lib/modules/template/service";
 import { resolveLocale } from "@/lib/modules/template/render";
 import type {
   CreateAutomationInput,
@@ -286,8 +287,14 @@ export const automationService = {
     // （buildSubjectSnapshot 已直接吃下），也可能是"有 template 时的主题覆盖"，
     // 后者必须在创建 run 时烘焙进 snapshot，否则后续 Automation.subjects 编辑会
     // 影响已调度 / 重试中的 run。
+    //
+    // 14.9：有 template 时同步冻结模板片段（freezeBlocksForSnapshot），缺片段
+    // 直接抛 ValidationError，避免 run 在 worker 阶段才发现引用悬空。
+    const blocksPerLocale = automation.template
+      ? await freezeBlocksForSnapshot(automation.template)
+      : undefined;
     const baseSnapshot = automation.template
-      ? buildTemplateSnapshot(automation.template)
+      ? buildTemplateSnapshot(automation.template, blocksPerLocale)
       : buildSubjectSnapshot(automation.subjects);
     const templateSnapshot = automation.template
       ? applySubjectOverrides(baseSnapshot, subjectsRecord(automation.subjects))

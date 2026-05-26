@@ -1,5 +1,11 @@
 import type { Locale, LocaleStrategy } from "@prisma/client";
-import { render, type BuiltinVariableInput } from "@/lib/template-engine";
+import {
+  expandBlocks,
+  render,
+  type BlockResolver,
+  type BuiltinVariableInput,
+  type ExpandOptions,
+} from "@/lib/template-engine";
 import type { LocaleContent, TemplateSnapshot } from "./snapshot";
 
 export class MissingLocaleContentError extends Error {
@@ -38,6 +44,25 @@ export interface TemplateVariantContent {
   textContents?: Partial<Record<Locale, string | null>>;
 }
 
+/**
+ * Render-time expansion 渲染入口。
+ *
+ * 两阶段：
+ *   1. 若提供 `blocks` resolver，对 subject/html/text 调 `expandBlocks` 展开
+ *      `{{> name}}` 引用；展开过程中循环 / 深度 / 大小越界会抛 `BlockExpansionError`。
+ *   2. 然后才走变量替换（已有 `render`）。这样确保 stage-2 输出的字面量
+ *      `{{> evil}}` 不会被再次解析，满足"不可逃逸"不变量。
+ *
+ * `blocks` 缺省时走零开销路径（与升级前完全一致），方便旧调用点逐步切换。
+ *
+ * @param input.blocks 片段解析器。Campaign/Automation 路径传"快照内只读 resolver"，
+ *   测试发送 / 预览路径传"实时仓储 resolver"。
+ * @param input.missingBlock 透传给 `expandBlocks` 的 missing 策略：
+ *   - `'throw'`：测试发送 / Worker 应使用，避免静默漂移；
+ *   - `'keep'`：预览应使用，便于编辑器展示未解析片段；
+ *   - `'empty'`：兜底；
+ *   未指定时遵从 `expandBlocks` 默认值（`'throw'`）。
+ */
 export function renderSnapshotContent(input: {
   snapshot: TemplateSnapshot;
   resolvedLocale: Locale;
@@ -45,6 +70,8 @@ export function renderSnapshotContent(input: {
   variant?: TemplateVariantContent | null;
   variables?: Record<string, string>;
   builtin?: BuiltinVariableInput;
+  blocks?: BlockResolver;
+  missingBlock?: ExpandOptions["missing"];
 }): { subject: string; html: string; text?: string; locale: Locale } {
   let locale = input.resolvedLocale;
   let baseContent = input.snapshot.locales[locale] ?? null;
@@ -59,12 +86,23 @@ export function renderSnapshotContent(input: {
   const subjectTemplate = overrideSubject ? overrideSubject : content.subject;
   const builtin = withLocalizedBuiltinText(locale, input.builtin ?? {});
 
+  const expand = (src: string): string => {
+    if (!input.blocks) return src;
+    return expandBlocks(src, input.blocks, {
+      ...(input.missingBlock ? { missing: input.missingBlock } : {}),
+    });
+  };
+
+  const subjectExpanded = expand(subjectTemplate);
+  const htmlExpanded = expand(content.htmlContent);
+  const textExpanded = content.textContent ? expand(content.textContent) : null;
+
   return {
     locale,
-    subject: render(subjectTemplate, input.variables ?? {}, { builtin }),
-    html: render(content.htmlContent, input.variables ?? {}, { builtin }),
-    ...(content.textContent
-      ? { text: render(content.textContent, input.variables ?? {}, { builtin }) }
+    subject: render(subjectExpanded, input.variables ?? {}, { builtin }),
+    html: render(htmlExpanded, input.variables ?? {}, { builtin }),
+    ...(textExpanded !== null
+      ? { text: render(textExpanded, input.variables ?? {}, { builtin }) }
       : {}),
   };
 }

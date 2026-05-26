@@ -24,7 +24,7 @@ import { audit } from "@/lib/audit";
 import { env } from "@/lib/env";
 import { isValidFromHeader } from "@/lib/email-utils";
 import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
-import { templateService } from "@/lib/modules/template/service";
+import { templateService, freezeBlocksForSnapshot } from "@/lib/modules/template/service";
 import { buildTemplateSnapshot } from "@/lib/modules/template/snapshot";
 import { compileSegmentCondition } from "@/lib/modules/segment/compiler";
 import {
@@ -164,6 +164,8 @@ export const campaignService = {
       }
     }
 
+    const blocksPerLocale = await freezeBlocksForSnapshot(tpl);
+
     const data: Prisma.CampaignUncheckedCreateInput = {
       name: input.name,
       subjects: cleanSubjectOverrides(input.subjects, availableLocales),
@@ -173,7 +175,7 @@ export const campaignService = {
       replyTo: input.replyTo ?? null,
       sendingChannelId: input.sendingChannelId ?? null,
       templateId: tpl.id,
-      templateSnapshot: buildTemplateSnapshot(tpl) as unknown as Prisma.InputJsonValue,
+      templateSnapshot: buildTemplateSnapshot(tpl, blocksPerLocale) as unknown as Prisma.InputJsonValue,
       segmentId: input.segmentId ?? null,
       tagFilter: input.tagFilter ?? [],
       tagFilterMode: input.tagFilterMode ?? "ANY",

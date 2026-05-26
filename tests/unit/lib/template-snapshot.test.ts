@@ -130,4 +130,85 @@ describe("template snapshot helpers", () => {
       });
     });
   });
+
+  describe("blocks field (frozen template blocks)", () => {
+    it("buildTemplateSnapshot freezes blocksPerLocale into snapshot.blocks", () => {
+      const snapshot = buildTemplateSnapshot(
+        {
+          version: 1,
+          defaultLocale: "zh",
+          variables: ["name"],
+          locales: [
+            {
+              locale: "zh",
+              subject: "你好",
+              htmlContent: "<p>{{> footer}}</p>",
+              textContent: null,
+            },
+          ],
+        },
+        { zh: { footer: "<small>bye</small>" } },
+      );
+      expect(snapshot.blocks).toEqual({
+        zh: { footer: "<small>bye</small>" },
+      });
+    });
+
+    it("buildTemplateSnapshot omits blocks when blocksPerLocale not provided (back-compat)", () => {
+      const snapshot = buildTemplateSnapshot({
+        version: 1,
+        defaultLocale: "zh",
+        variables: [],
+        locales: [
+          {
+            locale: "zh",
+            subject: "你好",
+            htmlContent: "<p>plain</p>",
+            textContent: null,
+          },
+        ],
+      });
+      expect(snapshot.blocks).toBeUndefined();
+    });
+
+    it("snapshot serialization round-trip preserves blocks field", () => {
+      const original: TemplateSnapshot = {
+        version: 2,
+        defaultLocale: "zh",
+        variables: ["name"],
+        locales: {
+          zh: { subject: "s", htmlContent: "<p>{{> f}}</p>", textContent: null },
+        },
+        blocks: { zh: { f: "<i>z</i>" }, en: { f: "<i>e</i>" } },
+      };
+      const restored: TemplateSnapshot = JSON.parse(JSON.stringify(original));
+      expect(restored.blocks).toEqual(original.blocks);
+    });
+
+    it("legacy snapshot without blocks deserializes to blocks=undefined", () => {
+      const legacyJson = `{
+        "version": 1,
+        "defaultLocale": "zh",
+        "variables": [],
+        "locales": { "zh": { "subject": "s", "htmlContent": "<p>x</p>", "textContent": null } }
+      }`;
+      const restored: TemplateSnapshot = JSON.parse(legacyJson);
+      expect(restored.blocks).toBeUndefined();
+    });
+
+    it("applySubjectOverrides preserves blocks field", () => {
+      const original: TemplateSnapshot = {
+        version: 2,
+        defaultLocale: "zh",
+        variables: [],
+        locales: {
+          zh: { subject: "原标题", htmlContent: "<p>x</p>", textContent: null },
+        },
+        blocks: { zh: { footer: "<i>z</i>" } },
+      };
+      const out = applySubjectOverrides(original, { zh: "新" });
+      expect(out.blocks).toEqual(original.blocks);
+      expect(out.locales.zh?.subject).toBe("新");
+    });
+  });
 });

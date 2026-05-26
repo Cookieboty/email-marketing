@@ -7,6 +7,11 @@ import {
   MissingVariableError,
   RAW_HTML_VARIABLES,
   BUILTIN_VARIABLE_NAMES,
+  expandBlocks,
+  extractBlockRefs,
+  extractAllVariables,
+  BlockExpansionError,
+  type BlockResolver,
 } from "@/lib/template-engine";
 
 describe("template-engine: escapeHtml", () => {
@@ -191,5 +196,164 @@ describe("template-engine: unsubscribe_topic_link rendering", () => {
     });
     expect(out).toContain("&quot;");
     expect(out).toContain("&lt;/a&gt;");
+  });
+});
+
+function makeResolver(map: Record<string, string>): BlockResolver {
+  return {
+    get(name: string) {
+      return Object.prototype.hasOwnProperty.call(map, name) ? map[name]! : null;
+    },
+  };
+}
+
+describe("template-engine: expandBlocks", () => {
+  it("expands a single-level block reference", () => {
+    const r = makeResolver({ footer: "<p>bye</p>" });
+    expect(expandBlocks("Hi {{> footer}}", r)).toBe("Hi <p>bye</p>");
+  });
+
+  it("expands nested block references depth-first", () => {
+    const r = makeResolver({ A: "{{> B}}", B: "hello" });
+    expect(expandBlocks("{{> A}}", r)).toBe("hello");
+  });
+
+  it("detects 2-cycle and throws CYCLE with full trace", () => {
+    const r = makeResolver({ A: "{{> B}}", B: "{{> A}}" });
+    expect.assertions(3);
+    try {
+      expandBlocks("{{> A}}", r);
+    } catch (err) {
+      expect(err).toBeInstanceOf(BlockExpansionError);
+      const e = err as BlockExpansionError;
+      expect(e.code).toBe("CYCLE");
+      expect(e.trace).toEqual(["A", "B", "A"]);
+    }
+  });
+
+  it("detects self-reference cycle", () => {
+    const r = makeResolver({ A: "{{> A}}" });
+    expect.assertions(2);
+    try {
+      expandBlocks("{{> A}}", r);
+    } catch (err) {
+      const e = err as BlockExpansionError;
+      expect(e.code).toBe("CYCLE");
+      expect(e.trace).toEqual(["A", "A"]);
+    }
+  });
+
+  it("throws DEPTH when nesting exceeds maxDepth (default 4)", () => {
+    // A→B→C→D→E：5 层超过 maxDepth=4
+    const r = makeResolver({
+      A: "{{> B}}",
+      B: "{{> C}}",
+      C: "{{> D}}",
+      D: "{{> E}}",
+      E: "leaf",
+    });
+    expect.assertions(2);
+    try {
+      expandBlocks("{{> A}}", r);
+    } catch (err) {
+      const e = err as BlockExpansionError;
+      expect(e.code).toBe("DEPTH");
+      expect(e.trace).toEqual(["A", "B", "C", "D", "E"]);
+    }
+  });
+
+  it("throws SIZE on fan-out expansion exceeding maxBytes", () => {
+    // 每层引用同一片段两次 → 5 层 ~ 2^5=32 倍膨胀；用低 maxBytes 触发
+    const big = "x".repeat(64);
+    const r = makeResolver({
+      L1: "{{> L2}}{{> L2}}",
+      L2: "{{> L3}}{{> L3}}",
+      L3: "{{> L4}}{{> L4}}",
+      L4: big,
+    });
+    expect.assertions(1);
+    try {
+      expandBlocks("{{> L1}}", r, { maxBytes: 256 });
+    } catch (err) {
+      expect((err as BlockExpansionError).code).toBe("SIZE");
+    }
+  });
+
+  it("missing='throw' raises MISSING for unknown ref", () => {
+    const r = makeResolver({});
+    expect.assertions(2);
+    try {
+      expandBlocks("{{> ghost}}", r);
+    } catch (err) {
+      const e = err as BlockExpansionError;
+      expect(e.code).toBe("MISSING");
+      expect(e.blockName).toBe("ghost");
+    }
+  });
+
+  it("missing='keep' preserves the original token", () => {
+    const r = makeResolver({});
+    expect(expandBlocks("Hi {{> ghost}}!", r, { missing: "keep" })).toBe(
+      "Hi {{> ghost}}!",
+    );
+  });
+
+  it("missing='empty' replaces unknown ref with empty string", () => {
+    const r = makeResolver({});
+    expect(expandBlocks("Hi {{> ghost}}!", r, { missing: "empty" })).toBe(
+      "Hi !",
+    );
+  });
+
+  it("does NOT replace variables in stage 1 (mixed with vars)", () => {
+    const r = makeResolver({ hdr: "Hi {{user_name}}" });
+    // 展开后片段内的变量原样保留，留给 Stage 2
+    expect(expandBlocks("{{> hdr}} {{user_name}}", r)).toBe(
+      "Hi {{user_name}} {{user_name}}",
+    );
+  });
+
+  it("stage-2 variable output is NOT re-parsed as block ref", () => {
+    // render 的产物里出现 {{> evil}} 不应触发 evil 展开
+    const r = makeResolver({ hdr: "static" });
+    // 用非 builtin 变量名 my_var；user_name 是 builtin 会被空内置覆盖掉
+    const stage1 = expandBlocks("{{> hdr}} {{my_var}}", r);
+    expect(stage1).toBe("static {{my_var}}");
+    // 外部调用方先 expandBlocks 后 render；变量值含 {{> evil}} 字面量应当原样保留
+    const stage2 = render(stage1, { my_var: "{{> evil}}" });
+    // my_var 经 escapeHtml：< > ' " & 被转义；{} 不在 escape 列表里——所以保留花括号字面量；
+    // > 会被转义为 &gt;。Stage 2 产物即使含 {{> 也无法被再次解析（不变量 3）。
+    expect(stage2).toBe("static {{&gt; evil}}");
+  });
+
+  it("tolerates whitespace around block name", () => {
+    const r = makeResolver({ footer: "ok" });
+    expect(expandBlocks("a{{>   footer  }}b", r)).toBe("aokb");
+  });
+
+  it("supports hyphenated block names", () => {
+    const r = makeResolver({ "brand-footer": "BF" });
+    expect(expandBlocks("X {{> brand-footer}}", r)).toBe("X BF");
+  });
+});
+
+describe("template-engine: extractBlockRefs", () => {
+  it("dedupes multiple references to the same block", () => {
+    expect(extractBlockRefs("{{> a}} mid {{> a}} end {{> b}}")).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("returns empty array when no references exist", () => {
+    expect(extractBlockRefs("just {{user_name}} variables")).toEqual([]);
+  });
+});
+
+describe("template-engine: extractAllVariables", () => {
+  it("collects variables across the template and its referenced blocks", () => {
+    const r = makeResolver({ footer: "{{company_name}}" });
+    const vars = extractAllVariables("{{user_name}} {{> footer}}", r);
+    expect(vars).toEqual(["user_name", "company_name"]);
   });
 });

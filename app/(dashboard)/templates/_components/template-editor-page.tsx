@@ -58,6 +58,7 @@ interface PreviewResp {
   renderedHtml: string;
   renderedText: string | null;
   detectedVariables: string[];
+  unknownBlocks?: string[];
 }
 
 export interface TemplateEditorPageProps {
@@ -173,10 +174,19 @@ export default function TemplateEditorPage({
     [activeLocale, variablesPerLocale],
   );
 
-  const customVariables = useMemo(
-    () => detectedVariables.filter((v) => !BUILTIN_SET.has(v)),
-    [detectedVariables],
-  );
+  const [preview, setPreview] = useState<PreviewResp | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewSeqRef = useRef(0);
+
+  const customVariables = useMemo(() => {
+    // 优先用后端 preview 返回的 detectedVariables（已通过 extractAllVariables
+    // 递归含片段内变量）；preview 未到达时退回前端顶层估算，避免初次渲染闪烁。
+    const source =
+      preview?.detectedVariables && preview.detectedVariables.length > 0
+        ? preview.detectedVariables
+        : detectedVariables;
+    return source.filter((v) => !BUILTIN_SET.has(v));
+  }, [preview?.detectedVariables, detectedVariables]);
 
   const [variableValues, setVariableValues] = useState<Record<string, string>>(
     {},
@@ -202,10 +212,6 @@ export default function TemplateEditorPage({
   const debouncedHtml = useDebouncedValue(activeContent?.htmlContent ?? "", 300);
   const debouncedText = useDebouncedValue(activeContent?.textContent ?? "", 300);
   const debouncedVars = useDebouncedValue(previewVariables, 300);
-
-  const [preview, setPreview] = useState<PreviewResp | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const previewSeqRef = useRef(0);
 
   useEffect(() => {
     const seq = ++previewSeqRef.current;
@@ -548,6 +554,14 @@ export default function TemplateEditorPage({
                 <div className="flex items-center justify-between">
                   <Label>正文 HTML</Label>
                   <div className="flex items-center gap-2">
+                    <BlockInserter
+                      locale={activeLocale}
+                      onInsert={(name) =>
+                        updateActiveLocale({
+                          htmlContent: `${activeContent.htmlContent}\n{{> ${name}}}`,
+                        })
+                      }
+                    />
                     {presentLocales
                       .filter((l) => l !== activeLocale)
                       .map((target) => (
@@ -662,6 +676,24 @@ export default function TemplateEditorPage({
 
         {/* 右栏：预览 */}
         <div className="space-y-3">
+          {preview?.unknownBlocks && preview.unknownBlocks.length > 0 ? (
+            <div
+              className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+              data-testid="template-preview-unknown-blocks"
+            >
+              <div className="font-medium">未知片段引用</div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {preview.unknownBlocks.map((name) => (
+                  <Badge key={name} variant="outline" className="border-amber-400 bg-white">
+                    {`{{> ${name}}}`}
+                  </Badge>
+                ))}
+              </div>
+              <div className="mt-1 text-[11px] text-amber-700">
+                这些片段在 {LOCALE_LABELS[activeLocale]} 下未找到；保存或测试发送会被拒绝。
+              </div>
+            </div>
+          ) : null}
           <div className="rounded-md border bg-card">
             <div className="flex items-center justify-between border-b px-3 py-2 text-xs text-muted-foreground">
               <span>主题预览（{LOCALE_LABELS[activeLocale]}）</span>
@@ -1227,5 +1259,65 @@ function TestSendDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+interface BlockListItem {
+  id: string;
+  name: string;
+  category: string | null;
+  locale: Locale;
+}
+
+interface BlockListResp {
+  data: BlockListItem[];
+}
+
+/**
+ * 编辑器内"插入片段"下拉。
+ *
+ * - 仅按 activeLocale 拉取 templateBlock 列表，避免误插他 locale。
+ * - 选中后由父组件以 `{{> name}}` 形式追加进 htmlContent；这是最小可用形态，
+ *   不做光标定位（与 RichTextEditor / Textarea 双模式兼容）。
+ * - 列表为空 → 渲染 disabled 占位，提示去片段管理页创建。
+ */
+function BlockInserter({
+  locale,
+  onInsert,
+}: {
+  locale: Locale;
+  onInsert: (name: string) => void;
+}) {
+  const { data, isLoading } = useSWR<BlockListResp>(
+    `/api/template-blocks?locale=${locale}&pageSize=200`,
+    swrFetcher,
+  );
+  const items = data?.data ?? [];
+  return (
+    <select
+      className="rounded-md border bg-background px-2 py-1 text-xs"
+      value=""
+      onChange={(e) => {
+        const v = e.target.value;
+        if (!v) return;
+        onInsert(v);
+        e.target.value = "";
+      }}
+      disabled={isLoading || items.length === 0}
+      data-testid={`template-block-inserter-${locale}`}
+    >
+      <option value="">
+        {isLoading
+          ? "加载片段..."
+          : items.length === 0
+            ? "（暂无片段）"
+            : "插入片段..."}
+      </option>
+      {items.map((b) => (
+        <option key={b.id} value={b.name}>
+          {b.category ? `${b.category} / ${b.name}` : b.name}
+        </option>
+      ))}
+    </select>
   );
 }

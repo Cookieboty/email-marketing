@@ -4,7 +4,7 @@
  * 仅做 SQL 操作，无业务校验。
  */
 
-import type { Prisma, TemplateBlock } from "@prisma/client";
+import type { Locale, Prisma, TemplateBlock } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { PrismaTx } from "../user/repository";
 import type { ListTemplateBlocksQuery } from "./schema";
@@ -15,6 +15,16 @@ export interface ListTemplateBlocksResult {
   page: number;
   pageSize: number;
 }
+
+export interface FindBlockPair {
+  locale: Locale;
+  name: string;
+}
+
+export type TemplateBlockRefRow = Pick<
+  TemplateBlock,
+  "id" | "name" | "locale" | "htmlContent" | "updatedAt"
+>;
 
 export const templateBlockRepository = {
   async list(
@@ -39,6 +49,39 @@ export const templateBlockRepository = {
 
   async findById(id: string, db: PrismaTx = prisma): Promise<TemplateBlock | null> {
     return db.templateBlock.findUnique({ where: { id } });
+  },
+
+  /**
+   * 按 (locale, name) 配对批量查询模板片段。
+   *
+   * - `pairs.length === 0` 时短路返回空数组，避免 Prisma 把空 `OR` 数组解释为
+   *   空过滤导致全表扫描。
+   * - 仅 `select` 渲染 / 冻结所需字段，避免拉取潜在大字段。
+   * - 不存在的 pair 不会出现在结果中，也不抛错；调用方负责缺失校验。
+   */
+  async findManyByPairs(
+    pairs: ReadonlyArray<FindBlockPair>,
+    db: PrismaTx = prisma,
+  ): Promise<TemplateBlockRefRow[]> {
+    if (pairs.length === 0) return [];
+    const seen = new Set<string>();
+    const dedup: FindBlockPair[] = [];
+    for (const p of pairs) {
+      const key = `${p.locale}::${p.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dedup.push({ locale: p.locale, name: p.name });
+    }
+    return db.templateBlock.findMany({
+      where: { OR: dedup.map((p) => ({ locale: p.locale, name: p.name })) },
+      select: {
+        id: true,
+        name: true,
+        locale: true,
+        htmlContent: true,
+        updatedAt: true,
+      },
+    });
   },
 
   async create(

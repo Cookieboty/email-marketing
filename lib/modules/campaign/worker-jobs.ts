@@ -8,6 +8,7 @@ import { isOverLimit } from "@/lib/modules/frequency/check";
 import { evaluateDeliverability } from "@/lib/modules/subscription-category/unsubscribe";
 import { renderSnapshotContent, type TemplateVariantContent } from "@/lib/modules/template/render";
 import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
+import { makeLocaleBlockResolver } from "@/lib/modules/template/service";
 import { campaignService } from "./service";
 import { snapshotRecipients } from "./snapshot";
 import { transformHtml } from "./html-transform";
@@ -148,6 +149,8 @@ export async function processSendQueue(): Promise<void> {
           : null,
         variables: envVars,
         builtin,
+        blocks: makeLocaleBlockResolver(snapshot.blocks?.[r.resolvedLocale]),
+        missingBlock: "throw",
       });
       const finalHtml = transformHtml(rendered.html, {
         campaignId: campaign.id,
@@ -421,11 +424,14 @@ export async function automationRunProcessor(): Promise<void> {
       };
       // spec §25：严格只读发送快照。Automation.subjects 的覆盖已在 scheduleRun
       // 时烘焙进 templateSnapshot，这里不再回查 live automation.subjects。
+      const runSnapshot = run.templateSnapshot as unknown as TemplateSnapshot;
       const rendered = renderSnapshotContent({
-        snapshot: run.templateSnapshot as unknown as TemplateSnapshot,
+        snapshot: runSnapshot,
         resolvedLocale: run.resolvedLocale,
         variables: autoEnvVars,
         builtin,
+        blocks: makeLocaleBlockResolver(runSnapshot.blocks?.[run.resolvedLocale]),
+        missingBlock: "throw",
       });
 
       const result = await sendSingle({

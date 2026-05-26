@@ -6,11 +6,24 @@ export interface LocaleContent {
   textContent: string | null;
 }
 
+/**
+ * 已冻结的模板片段表：`blocks[locale][blockName] = htmlContent`。
+ *
+ * - 字段为可选：旧 snapshot（写入前于 phase-14 之前）不含 `blocks`，
+ *   反序列化后保持 `undefined`，调用方需用空 resolver 兜底。
+ * - 内层 `Record<name, htmlContent>` 仅冻结渲染所需 HTML 内容；不存
+ *   `id/updatedAt` 等元数据，避免快照体积膨胀。
+ */
+export type FrozenBlocksByLocale = Partial<
+  Record<Locale, Record<string, string>>
+>;
+
 export interface TemplateSnapshot {
   version: number;
   defaultLocale: Locale;
   locales: Partial<Record<Locale, LocaleContent>>;
   variables: string[];
+  blocks?: FrozenBlocksByLocale;
 }
 
 export interface TemplateWithLocalesForSnapshot {
@@ -20,8 +33,16 @@ export interface TemplateWithLocalesForSnapshot {
   locales: Array<LocaleContent & { locale: Locale }>;
 }
 
+/**
+ * 构造模板快照。
+ *
+ * @param template 模板及其各 locale 内容
+ * @param blocksPerLocale 已预取并准备冻结的片段表；未提供时 snapshot 中
+ *   `blocks` 字段保持 `undefined`，下游渲染会走"无 resolver"路径。
+ */
 export function buildTemplateSnapshot(
   template: TemplateWithLocalesForSnapshot,
+  blocksPerLocale?: FrozenBlocksByLocale,
 ): TemplateSnapshot {
   const locales: Partial<Record<Locale, LocaleContent>> = {};
   for (const row of template.locales) {
@@ -37,6 +58,7 @@ export function buildTemplateSnapshot(
     defaultLocale: template.defaultLocale,
     locales,
     variables: template.variables,
+    ...(blocksPerLocale ? { blocks: blocksPerLocale } : {}),
   };
   assertSnapshotHasDefaultLocale(snapshot);
   return snapshot;
