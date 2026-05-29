@@ -37,6 +37,7 @@ export interface CampaignFormState {
   subscriptionCategory: string;
   isAbTest: boolean;
   variants: VariantInput[];
+  scheduledAt: string;
   utmSource: string;
   utmMedium: string;
   utmCampaign: string;

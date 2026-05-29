@@ -54,6 +54,7 @@ function makeForm(overrides: Partial<CampaignFormState> = {}): CampaignFormState
         },
       },
     ],
+    scheduledAt: "",
     utmSource: "",
     utmMedium: "email",
     utmCampaign: "",

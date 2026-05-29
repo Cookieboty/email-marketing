@@ -83,6 +83,7 @@ const INITIAL: CampaignFormState = {
   subscriptionCategory: "",
   isAbTest: false,
   variants: [makeInitialVariant("A", 25), makeInitialVariant("B", 25)],
+  scheduledAt: "",
   utmSource: "",
   utmMedium: "email",
   utmCampaign: "",
@@ -263,7 +264,32 @@ export default function CampaignCreatePage() {
       }
 
       const result = await apiPost<{ id: string }>("/api/campaigns", payload);
-      toast({ title: "活动已创建" });
+
+      let scheduledOk = false;
+      if (form.scheduledAt) {
+        const when = new Date(form.scheduledAt);
+        if (Number.isNaN(when.getTime()) || when.getTime() <= Date.now() + 60_000) {
+          toast({
+            title: "活动已创建为草稿",
+            description: "定时时间需至少在 1 分钟之后，请在详情页重新设置",
+            variant: "destructive",
+          });
+        } else {
+          try {
+            await apiPost(`/api/campaigns/${result.id}/schedule`, {
+              scheduledAt: when.toISOString(),
+            });
+            scheduledOk = true;
+          } catch (e) {
+            toast({
+              title: "已创建草稿，定时设置失败",
+              description: asMessage(e),
+              variant: "destructive",
+            });
+          }
+        }
+      }
+      toast({ title: scheduledOk ? "活动已创建并定时" : "活动已创建" });
 
       try {
         const cov = await fetchCoverage(result.id);
@@ -558,6 +584,20 @@ export default function CampaignCreatePage() {
 
         {step === 3 && (
           <div className="space-y-4" data-testid="step-options">
+            <div className="space-y-1.5 rounded-md border p-4">
+              <Label htmlFor="schedule-at">定时发送时间（可选）</Label>
+              <Input
+                id="schedule-at"
+                type="datetime-local"
+                value={form.scheduledAt}
+                onChange={(e) => upd({ scheduledAt: e.target.value })}
+                data-testid="input-scheduled-at"
+              />
+              <p className="text-xs text-muted-foreground">
+                留空则创建为草稿，可稍后手动发送；填写后将在该时间自动发送，触发精度约 1 分钟。
+              </p>
+            </div>
+
             <div className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -904,6 +944,14 @@ export default function CampaignCreatePage() {
                   </dd>
                 </div>
               )}
+              {form.scheduledAt && (
+                <div className="flex gap-2">
+                  <dt className="w-28 shrink-0 text-muted-foreground">定时发送</dt>
+                  <dd data-testid="preview-scheduled-at">
+                    {new Date(form.scheduledAt).toLocaleString()}
+                  </dd>
+                </div>
+              )}
             </dl>
           </div>
         )}
@@ -932,7 +980,7 @@ export default function CampaignCreatePage() {
             onClick={() => void handleSubmit()}
             data-testid="btn-create"
           >
-            {submitting ? "创建中..." : "创建活动"}
+            {submitting ? "创建中..." : form.scheduledAt ? "创建并定时" : "创建活动"}
           </Button>
         )}
       </div>
