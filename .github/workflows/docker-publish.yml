@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v4.1.0
 
       - name: Log in to the Container registry
@@ -42,6 +43,29 @@ jobs:
             type=semver,pattern={{version}}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Restore build caches
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildcache/pnpm-store
+            .buildcache/next-cache
+          key: buildcache-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            buildcache-${{ hashFiles('pnpm-lock.yaml') }}-
+            buildcache-
+
+      - name: Inject build caches into buildx
+        uses: reproducible-containers/buildkit-cache-dance@v3
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          cache-map: |
+            {
+              ".buildcache/pnpm-store": "/pnpm/store",
+              ".buildcache/next-cache": "/app/.next/cache"
+            }
+          skip-extraction: ${{ steps.cache.outputs.cache-hit }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7.2.0

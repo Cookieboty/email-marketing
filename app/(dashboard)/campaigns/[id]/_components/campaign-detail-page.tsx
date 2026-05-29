@@ -96,6 +96,9 @@ export default function CampaignDetailPage({ id }: { id: string }) {
   const [testSendTo, setTestSendTo] = useState("");
   const [testSendLocale, setTestSendLocale] = useState<"zh" | "en">("zh");
   const [testSending, setTestSending] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleAt, setScheduleAt] = useState("");
+  const [scheduling, setScheduling] = useState(false);
 
   const { data: c, isLoading, mutate } = useSWR<CampaignDetail>(
     swrKeys.campaign(id),
@@ -144,6 +147,30 @@ export default function CampaignDetailPage({ id }: { id: string }) {
       toast({ title: "测试发送失败", description: asMessage(e), variant: "destructive" });
     } finally {
       setTestSending(false);
+    }
+  }
+
+  async function handleSchedule() {
+    if (!scheduleAt) {
+      toast({ title: "请选择发送时间", variant: "destructive" });
+      return;
+    }
+    const when = new Date(scheduleAt);
+    if (when.getTime() <= Date.now() + 60_000) {
+      toast({ title: "发送时间需至少在 1 分钟之后", variant: "destructive" });
+      return;
+    }
+    setScheduling(true);
+    try {
+      await apiPost(`/api/campaigns/${id}/schedule`, { scheduledAt: when.toISOString() });
+      toast({ title: "已设置定时发送", description: when.toLocaleString() });
+      setScheduleOpen(false);
+      setScheduleAt("");
+      await mutate();
+    } catch (e) {
+      toast({ title: "定时发送设置失败", description: asMessage(e), variant: "destructive" });
+    } finally {
+      setScheduling(false);
     }
   }
 
@@ -212,6 +239,17 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               data-testid="action-test-send"
             >
               测试发送
+            </Button>
+          )}
+          {c.status === "DRAFT" && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => setScheduleOpen(true)}
+              data-testid="action-schedule"
+            >
+              定时发送
             </Button>
           )}
           {actions.map((a) => (
@@ -400,6 +438,51 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               data-testid="campaign-test-send-submit"
             >
               {testSending ? "发送中..." : "发送"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={scheduleOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setScheduleAt("");
+            setScheduleOpen(false);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>定时发送</DialogTitle>
+            <DialogDescription>
+              到点后由后台任务自动发送，触发精度约 1 分钟。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="schedule-at">发送时间</Label>
+            <Input
+              id="schedule-at"
+              type="datetime-local"
+              value={scheduleAt}
+              onChange={(e) => setScheduleAt(e.target.value)}
+              data-testid="campaign-schedule-at"
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setScheduleOpen(false)}
+              disabled={scheduling}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleSchedule}
+              disabled={scheduling}
+              data-testid="campaign-schedule-submit"
+            >
+              {scheduling ? "设置中..." : "确认定时"}
             </Button>
           </DialogFooter>
         </DialogContent>
