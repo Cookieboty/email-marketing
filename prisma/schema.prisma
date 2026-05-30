@@ -1,6 +1,6 @@
 // =====================================================================
 // Email Marketing Platform — Prisma Schema
-// 阶段 1：22 模型 / 11 枚举 / 完整外键级联与索引策略
+// 35 模型 / 22 枚举 / 完整外键级联与索引策略
 // 对齐 specs §95-292（数据模型 + 状态机 + 枚举）
 // =====================================================================
 
@@ -14,7 +14,7 @@ datasource db {
 }
 
 // =====================================================================
-// 枚举（11 个）
+// 枚举（22 个）
 // =====================================================================
 
 enum RecipientStatus {
@@ -568,6 +568,7 @@ model CampaignRecipient {
   events     EmailEvent[]
   linkClicks LinkClick[]
 
+  @@unique([campaignId, userId])
   @@index([campaignId, status])
   @@index([campaignId, lockedBy])
   @@index([status, nextRetryAt])

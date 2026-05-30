@@ -23,7 +23,6 @@ import { prisma } from "@/lib/prisma";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { audit } from "@/lib/audit";
-import { normalizeEmail } from "@/lib/email-utils";
 import { getRateLimiter } from "@/lib/rate-limit";
 import {
   ConflictError,
@@ -651,8 +650,6 @@ export async function testSmtpSend(
   input: TestSendInput,
   actor: { adminId: string; req?: { headers: Headers } | null },
 ): Promise<SmtpTestSendResult> {
-  const target = normalizeEmail(input.to);
-
   const limiter = getSmtpTestSendLimiter();
   const decision = limiter.check(`${SMTP_TEST_SEND_RL}:${actor.adminId}`);
   if (!decision.allowed) {

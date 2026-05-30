@@ -133,6 +133,13 @@ export async function processWebhookEvent(event: WebhookEvent): Promise<ProcessR
         const updateData: Record<string, unknown> = { status: newStatus };
         if (tsField) updateData[tsField] = new Date(event.data.created_at ?? Date.now());
         if (event.type === "bounced") updateData.bounceType = bounceTypeValue ?? "HARD";
+        // 软退信：安排指数退避重试（上限 24h），并递增 retryCount，
+        // 使 softBounceRetry 的 retryCount < 3 上限生效，避免无限重试。
+        if (newStatus === "SOFT_BOUNCED") {
+          const backoffHours = Math.min(2 ** recipient.retryCount, 24);
+          updateData.nextRetryAt = new Date(Date.now() + backoffHours * 3600_000);
+          updateData.retryCount = recipient.retryCount + 1;
+        }
         await tx.campaignRecipient.update({
           where: { id: recipient.id },
           data: updateData,

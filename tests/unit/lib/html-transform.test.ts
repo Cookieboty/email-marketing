@@ -81,4 +81,12 @@ describe("html-transform: HMAC verification", () => {
   it("verifyClickHmac returns false for tampered HMAC", () => {
     expect(verifyClickHmac("rcpt_1", "https://evil.com", "test-secret-key-1234", "0000000000000000")).toBe(false);
   });
+
+  it("emits full 64-hex HMAC (not truncated)", () => {
+    const html = '<a href="https://example.com">Click</a>';
+    const result = transformHtml(html, BASE_OPTS);
+    const match = result.match(/t=([a-f0-9]+)/);
+    expect(match).not.toBeNull();
+    expect(match![1]!).toHaveLength(64);
+  });
 });

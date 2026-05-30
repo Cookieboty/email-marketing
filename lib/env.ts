@@ -44,14 +44,10 @@ const Schema = z.object({
 
   WORKER_POLL_INTERVAL: z.coerce.number().int().positive().default(60_000),
 
-  EVENT_API_TOKEN: z.string().optional(),
-
   RATE_LIMIT_LOGIN_MAX: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_LOGIN_WINDOW_SEC: z.coerce.number().int().positive().default(900),
   RATE_LIMIT_TEST_SEND_MAX: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_TEST_SEND_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
-  RATE_LIMIT_EVENT_MAX: z.coerce.number().int().positive().default(600),
-  RATE_LIMIT_EVENT_WINDOW_SEC: z.coerce.number().int().positive().default(3600),
 
   INBOUND_TIMESTAMP_TOLERANCE_SEC: z.coerce.number().int().positive().default(300),
   INBOUND_REQUEST_LOG_TTL_DAYS: z.coerce.number().int().positive().default(7),

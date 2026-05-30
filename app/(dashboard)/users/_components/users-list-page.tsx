@@ -12,8 +12,12 @@ import { DataTable } from "@/components/data-table";
 import { Pagination } from "@/components/pagination";
 import { TagPicker } from "@/components/tag-picker";
 import { apiPost, swrFetcher } from "@/lib/api-client";
+import { useToast } from "@/components/ui/toast";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
+
+// 与后端 BATCH_TAG_FILTER_LIMIT 保持一致：filter 模式批量打标的上限。
+const BATCH_TAG_FILTER_LIMIT = 1000;
 import type { Locale } from "@/app/(dashboard)/templates/_components/types";
 import { formatUserLocaleShort } from "./user-locale-helpers";
 
@@ -79,6 +83,7 @@ export default function UsersListPage() {
   const [batchMode, setBatchMode] = useState<"add" | "remove" | null>(null);
   const [batchTagIds, setBatchTagIds] = useState<string[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+  const { toast } = useToast();
 
   const debouncedQ = useDebouncedValue(q, 300);
 
@@ -278,9 +283,19 @@ export default function UsersListPage() {
       } else {
         body.userIds = Object.keys(rowSelection);
       }
-      await apiPost("/api/users/tags/batch", body);
+      const result = await apiPost<{ affected: number }>("/api/users/tags/batch", body);
       await mutate();
       resetSelection();
+      toast({
+        title: batchMode === "add" ? "已添加标签" : "已移除标签",
+        description: `影响 ${result.affected} 位用户`,
+      });
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: "批量操作失败",
+        description: err instanceof Error ? err.message : "请稍后重试",
+      });
     } finally {
       setBatchLoading(false);
     }
@@ -380,10 +395,15 @@ export default function UsersListPage() {
           <span className="text-sm font-medium">
             已选 {selectedCount} 位用户
           </span>
-          {!selectAll && total > pageSize && (
+          {!selectAll && total > pageSize && total <= BATCH_TAG_FILTER_LIMIT && (
             <Button variant="link" size="sm" onClick={() => setSelectAll(true)}>
               选择全部 {total} 个符合条件的用户
             </Button>
+          )}
+          {!selectAll && total > BATCH_TAG_FILTER_LIMIT && (
+            <span className="text-xs text-muted-foreground">
+              符合条件 {total} 人，超过 {BATCH_TAG_FILTER_LIMIT} 上限，请缩小筛选范围后再整体操作
+            </span>
           )}
           {selectAll && (
             <Button variant="link" size="sm" onClick={() => setSelectAll(false)}>

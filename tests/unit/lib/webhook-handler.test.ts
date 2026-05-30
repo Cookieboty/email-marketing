@@ -107,4 +107,34 @@ describe("webhook handler", () => {
     });
     expect(result.processed).toBe(true);
   });
+
+  it("soft bounce schedules nextRetryAt with exponential backoff and increments retryCount", async () => {
+    mockPrisma.emailEvent.findUnique.mockResolvedValue(null);
+    mockPrisma.campaignRecipient.findUnique.mockResolvedValue({
+      id: "rcpt_sb",
+      campaignId: "camp_1",
+      userId: "user_1",
+      status: "SENT" as RecipientStatus,
+      retryCount: 1,
+      user: { id: "user_1", email: "sb@example.com", totalBounceCount: 0, unsubscribed: false },
+    });
+    mockPrisma.$transaction.mockImplementation(async (fn: Function) => fn(mockPrisma));
+
+    const before = Date.now();
+    const result = await processWebhookEvent({
+      type: "bounced",
+      data: { email_id: "resend_sb", bounce_type: "soft", created_at: new Date().toISOString() },
+    });
+
+    expect(result.processed).toBe(true);
+    const updateArg = mockPrisma.campaignRecipient.update.mock.calls[0]![0] as {
+      data: { status: string; retryCount: number; nextRetryAt: Date };
+    };
+    expect(updateArg.data.status).toBe("SOFT_BOUNCED");
+    expect(updateArg.data.retryCount).toBe(2);
+    // retryCount=1 → backoff 2^1 = 2h
+    const deltaHours = (updateArg.data.nextRetryAt.getTime() - before) / 3600_000;
+    expect(deltaHours).toBeGreaterThan(1.9);
+    expect(deltaHours).toBeLessThan(2.1);
+  });
 });

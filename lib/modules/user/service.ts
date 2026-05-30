@@ -16,7 +16,7 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { normalizeEmail, isValidEmail } from "@/lib/email-utils";
 import { audit } from "@/lib/audit";
-import { ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
+import { AppError, ConflictError, NotFoundError, ValidationError } from "@/lib/errors";
 import type { BatchTagsInput, CreateUserInput, ListUsersQuery, UpdateUserInput } from "./schema";
 import { userRepository, type PrismaTx, type UserWithTags } from "./repository";
 import { resendOptInEmail, sendOptInEmail } from "./opt-in";
@@ -26,6 +26,9 @@ interface ActorContext {
   actorType: "ADMIN" | "SYSTEM" | "WEBHOOK";
   req?: { headers: Headers } | null;
 }
+
+// filter 模式批量打标的硬上限：超出需缩小筛选范围（防止全表更新）。
+const BATCH_TAG_FILTER_LIMIT = 1000;
 
 function isUniqueViolation(err: unknown, target: string): boolean {
   if (err instanceof PrismaNS.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -265,12 +268,25 @@ export const userService = {
     const userIds = await (async () => {
       if (input.userIds) return input.userIds;
       const filter = input.filter!;
-      return userRepository.listIds({
-        q: filter.q,
-        tagIds: filter.tagIds,
-        tagFilterMode: filter.tagFilterMode ?? "all",
-        unsubscribed: filter.unsubscribed,
-      });
+      // filter 模式无前端单页 100 上限的天然约束，必须在边界设硬上限，
+      // 否则空/宽 filter 会一次性更新全表用户。多取 1 条以判断是否溢出。
+      const ids = await userRepository.listIds(
+        {
+          q: filter.q,
+          tagIds: filter.tagIds,
+          tagFilterMode: filter.tagFilterMode ?? "all",
+          unsubscribed: filter.unsubscribed,
+        },
+        prisma,
+        BATCH_TAG_FILTER_LIMIT + 1,
+      );
+      if (ids.length > BATCH_TAG_FILTER_LIMIT) {
+        throw new AppError(
+          `批量操作最多支持 ${BATCH_TAG_FILTER_LIMIT} 位用户，请缩小筛选范围`,
+          { status: 400, code: "batch_limit_exceeded" },
+        );
+      }
+      return ids;
     })();
 
     if (userIds.length === 0) return { affected: 0 };

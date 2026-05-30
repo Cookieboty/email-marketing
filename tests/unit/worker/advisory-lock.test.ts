@@ -2,6 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const queryRawMock = vi.fn();
 
+// advisory lock 现使用专用 PrismaClient（connection_limit=1），mock 其构造函数，
+// 同时保留 @prisma/client 的枚举/类型供其他模块使用。
+vi.mock("@prisma/client", async (importActual) => {
+  const actual = await importActual<typeof import("@prisma/client")>();
+  return {
+    ...actual,
+    PrismaClient: vi.fn(() => ({
+      $queryRaw: (...args: unknown[]) => queryRawMock(...args),
+      $disconnect: vi.fn(),
+    })),
+  };
+});
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $queryRaw: (...args: unknown[]) => queryRawMock(...args),

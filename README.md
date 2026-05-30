@@ -36,7 +36,7 @@ pnpm install
 
 ```bash
 cp .env.example .env
-# 按需填写 ADMIN_TOKEN / SESSION_SECRET / RESEND_* / EVENT_API_TOKEN
+# 按需填写 ADMIN_TOKEN / SESSION_SECRET / RESEND_*
 
 pnpm db:up               # 启动 PostgreSQL（仅 postgres 容器）
 pnpm db:up:all           # 同时启动 Mailpit（http://localhost:8025）
@@ -120,7 +120,7 @@ lsof -i :5432
 │   └── setup.ts          # 测试环境初始化
 ├── docs/superpowers/     # 规范（specs）+ 实施计划（plans）
 ├── docker-compose.yml    # 本地 Postgres + Mailpit
-├── .env.example          # 环境变量样板（含 EVENT_API_TOKEN 与 6 个 RATE_LIMIT_*）
+├── .env.example          # 环境变量样板（含 4 个 RATE_LIMIT_*）
 └── package.json
 ```
 

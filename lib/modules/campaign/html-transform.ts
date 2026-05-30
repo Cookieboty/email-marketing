@@ -13,8 +13,7 @@ export interface TransformHtmlOptions {
 function generateClickHmac(recipientId: string, url: string, secret: string): string {
   return createHmac("sha256", secret)
     .update(`${recipientId}:${url}`)
-    .digest("hex")
-    .slice(0, 16);
+    .digest("hex");
 }
 
 export function verifyClickHmac(

@@ -37,7 +37,9 @@ export const CreateApiClientSchema = z.object({
   ipWhitelist: z.array(IpEntrySchema).max(50).optional(),
   rpsLimit: z.number().int().positive().max(10_000).optional(),
   rphLimit: z.number().int().positive().max(1_000_000).optional(),
-  enableHmac: z.boolean().optional(),
+  // 默认开启 HMAC：直接通过 API 创建时（省略该字段）也具备签名校验，
+  // 避免仅 Bearer token 的弱认证基线。
+  enableHmac: z.boolean().default(true),
   metadata: z.record(z.unknown()).optional(),
 });
 

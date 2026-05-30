@@ -104,6 +104,19 @@ export class RateLimiter {
     this.buckets.clear();
   }
 
+  /**
+   * 清理所有已过窗口且未锁定的 bucket，回收内存。
+   * 惰性清理仅在 key 被再次访问时触发，长尾 key 会永久驻留，故需周期 sweep。
+   */
+  sweep(now: number = Date.now()): void {
+    for (const [key, b] of this.buckets) {
+      if (b.lockedUntil > now) continue;
+      if (now - b.firstAttemptAt > this.cfg.windowSec * 1000) {
+        this.buckets.delete(key);
+      }
+    }
+  }
+
   private backoffFor(attempt: number): number {
     const idx = Math.min(attempt, this.cfg.backoffsMs.length - 1);
     return this.cfg.backoffsMs[idx] ?? 0;
@@ -115,6 +128,11 @@ export class RateLimiter {
  * 测试中可通过 `loginRateLimiter.clear()` 重置状态。
  */
 export const loginRateLimiter = new RateLimiter(loadLoginRateLimitConfig());
+
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+if (process.env.NODE_ENV !== "test" && !process.env.VITEST) {
+  setInterval(() => loginRateLimiter.sweep(), SWEEP_INTERVAL_MS).unref?.();
+}
 
 export function getClientIp(headers: Headers): string {
   const xff = headers.get("x-forwarded-for");

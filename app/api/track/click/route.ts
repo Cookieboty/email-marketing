@@ -8,20 +8,36 @@ export const runtime = "nodejs";
 
 const log = logger.child("track/click");
 
+function isSafeRedirectTarget(target: string): boolean {
+  try {
+    const parsed = new URL(target);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const rid = url.searchParams.get("rid");
   const originalUrl = url.searchParams.get("url");
   const hmac = url.searchParams.get("t");
 
+  const fallbackUrl = env().APP_URL ?? "/";
+
   if (!rid || !originalUrl || !hmac) {
-    return NextResponse.redirect(env().APP_URL ?? "/", 302);
+    return NextResponse.redirect(fallbackUrl, 302);
   }
 
   const secret = env().SESSION_SECRET;
   if (!secret || !verifyClickHmac(rid, originalUrl, secret, hmac)) {
     log.warn("click tracking hmac verification failed", { rid });
-    return NextResponse.redirect(originalUrl, 302);
+    return NextResponse.redirect(fallbackUrl, 302);
+  }
+
+  if (!isSafeRedirectTarget(originalUrl)) {
+    log.warn("click tracking unsafe redirect target", { rid });
+    return NextResponse.redirect(fallbackUrl, 302);
   }
 
   try {

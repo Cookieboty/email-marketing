@@ -17,7 +17,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${APP_PORT:-8000}/ || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${APP_PORT:-8000}/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -70,18 +70,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-  mailpit:
-    image: axllent/mailpit:latest
-    container_name: email_mailpit
-    restart: unless-stopped
-    ports:
-      - "1025:1025"
-      - "8025:8025"
-    environment:
-      MP_MAX_MESSAGES: 5000
-      MP_SMTP_AUTH_ACCEPT_ANY: 1
-      MP_SMTP_AUTH_ALLOW_INSECURE: 1
 
 volumes:
   email-postgres-data:

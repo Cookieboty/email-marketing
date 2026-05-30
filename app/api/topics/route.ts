@@ -7,7 +7,6 @@ import {
   ListTopicsQuerySchema,
 } from "@/lib/modules/topic/schema";
 import { topicService } from "@/lib/modules/topic/service";
-import { withApiClient } from "@/lib/modules/api-client/middleware";
 
 export const runtime = "nodejs";
 
@@ -20,7 +19,10 @@ export const GET = withAuth(async (_session, request: Request) => {
   return NextResponse.json(data);
 });
 
-const postWithAdmin = withAuth(async (_session, request: Request) => {
+// 仅保留 session（管理员）路径：ApiClient 分支依赖 Authorization header，
+// 但 /api/topics 不在 middleware 公开前缀内，凭 Bearer token 的请求会被
+// middleware 提前 401，故该分支不可达。如需对外开放，应新增 /api/inbound/topics。
+export const POST = withAuth(async (_session, request: Request) => {
   if (!verifyOrigin(request.headers)) throw new ForbiddenError("Forbidden origin");
   const input = await parseJsonBody(request, CreateTopicSchema);
   const t = await topicService.create(input, {
@@ -29,19 +31,3 @@ const postWithAdmin = withAuth(async (_session, request: Request) => {
   });
   return NextResponse.json(t, { status: 201 });
 });
-
-const postWithApiClient = withApiClient(["topic:write"], async (ctx, request) => {
-  const input = await parseJsonBody(request, CreateTopicSchema);
-  const t = await topicService.create(input, {
-    actorType: "WEBHOOK",
-    apiClientId: ctx.apiClient.id,
-    idempotencyKey: ctx.idempotencyKey,
-    req: { headers: request.headers },
-  });
-  return NextResponse.json(t, { status: 201 });
-});
-
-export function POST(request: Request): Promise<NextResponse> {
-  if (request.headers.has("authorization")) return postWithApiClient(request);
-  return postWithAdmin(request);
-}

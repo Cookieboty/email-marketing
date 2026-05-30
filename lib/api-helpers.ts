@@ -61,6 +61,13 @@ export async function parseJsonBody<S extends ZodTypeAny>(
   }
 }
 
+/**
+ * 从代理头提取客户端 IP。
+ *
+ * 信任边界：直接取 X-Forwarded-For 的首段，假设本服务部署在受信任的反向代理
+ * （如 Nginx / 负载均衡）之后，且该代理会重写/追加 XFF。若直接对公网暴露，
+ * 客户端可伪造 XFF，IP 不可信——此时仅用于限流/审计的尽力而为标识，不可用于鉴权。
+ */
 export function getClientIpFromHeaders(headers: Headers): string {
   const xff = headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0]!.trim();

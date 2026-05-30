@@ -1,4 +1,5 @@
 import cron, { type ScheduledTask } from "node-cron";
+import { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { recomputeSegmentCount } from "@/lib/modules/segment/service";
 import { recomputeAllUsers } from "@/lib/modules/segment/engagement";
@@ -52,12 +53,29 @@ function log(level: "info" | "warn" | "error", msg: string, extra?: Record<strin
 }
 
 /**
+ * Advisory lock 专用客户端：connection_limit=1 强制单连接池，
+ * 保证 acquire 与 release 跑在同一条连接上（session 级锁绑定连接）。
+ * 共享的 `prisma` 是连接池，release 可能落到未持锁的连接而静默失败。
+ */
+let lockClient: PrismaClient | null = null;
+
+function getLockClient(): PrismaClient {
+  if (lockClient) return lockClient;
+  const baseUrl = process.env.DATABASE_URL!;
+  const sep = baseUrl.includes("?") ? "&" : "?";
+  lockClient = new PrismaClient({
+    datasourceUrl: `${baseUrl}${sep}connection_limit=1`,
+  });
+  return lockClient;
+}
+
+/**
  * 尝试获取 PostgreSQL session-level advisory lock，确保单实例运行。
  *
  * 实现细节：
  *  - 使用 `pg_try_advisory_lock(hashtext('email_worker'))`
  *  - 这是 session 级锁，连接断开后自动释放，避免崩溃后死锁
- *  - 必须使用同一连接持有/释放，因此通过单例 Prisma 客户端保持长连接
+ *  - 通过 connection_limit=1 的专用客户端保证持锁/释放在同一连接
  *
  * DRY_RUN / 缺少 DATABASE_URL 时直接返回 true，便于本地烟囱测试与单测。
  */
@@ -71,7 +89,7 @@ export async function acquireLock(): Promise<boolean> {
     return true;
   }
 
-  const rows = await prisma.$queryRaw<Array<{ locked: boolean }>>`
+  const rows = await getLockClient().$queryRaw<Array<{ locked: boolean }>>`
     SELECT pg_try_advisory_lock(hashtext(${LOCK_KEY})) AS locked
   `;
   const locked = rows[0]?.locked === true;
@@ -86,7 +104,7 @@ export async function releaseLock(): Promise<void> {
   if (DRY_RUN || !process.env.DATABASE_URL) return;
   if (!ctx.lockHeld) return;
   try {
-    await prisma.$queryRaw<Array<{ unlocked: boolean }>>`
+    await getLockClient().$queryRaw<Array<{ unlocked: boolean }>>`
       SELECT pg_advisory_unlock(hashtext(${LOCK_KEY})) AS unlocked
     `;
     ctx.lockHeld = false;
@@ -97,6 +115,12 @@ export async function releaseLock(): Promise<void> {
 }
 
 let currentJob: string | null = null;
+let currentJobPromise: Promise<void> | null = null;
+const SHUTDOWN_GRACE_MS = 30_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function runExclusive(name: string, fn: () => Promise<void>): Promise<void> {
   if (ctx.shutdownRequested) return;
@@ -105,13 +129,18 @@ async function runExclusive(name: string, fn: () => Promise<void>): Promise<void
     return;
   }
   currentJob = name;
-  try {
-    await fn();
-  } catch (e) {
-    log("error", `job ${name} failed`, { error: e instanceof Error ? e.message : String(e) });
-  } finally {
-    currentJob = null;
-  }
+  const promise = (async () => {
+    try {
+      await fn();
+    } catch (e) {
+      log("error", `job ${name} failed`, { error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      currentJob = null;
+      currentJobPromise = null;
+    }
+  })();
+  currentJobPromise = promise;
+  await promise;
 }
 
 export function registerSchedules(): ScheduledTask[] {
@@ -286,6 +315,13 @@ async function shutdown(signal: string) {
     }
   }
 
+  // 等待在途任务完成（带超时），避免在 sendBatch / 导入中途硬退出，
+  // 放大 SENDING/RUNNING 中间态。
+  if (currentJobPromise) {
+    log("info", "waiting for in-flight job to finish", { job: currentJob, graceMs: SHUTDOWN_GRACE_MS });
+    await Promise.race([currentJobPromise.catch(() => undefined), sleep(SHUTDOWN_GRACE_MS)]);
+  }
+
   try {
     await releaseLock();
   } catch (e) {
@@ -294,6 +330,7 @@ async function shutdown(signal: string) {
 
   try {
     await prisma.$disconnect();
+    if (lockClient) await lockClient.$disconnect();
   } catch (e) {
     log("warn", "failed to disconnect prisma", { error: String(e) });
   }
@@ -318,6 +355,16 @@ async function main() {
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("unhandledRejection", (reason) => {
+    log("error", "unhandledRejection", {
+      reason: reason instanceof Error ? reason.message : String(reason),
+    });
+    void shutdown("unhandledRejection");
+  });
+  process.on("uncaughtException", (err) => {
+    log("error", "uncaughtException", { error: err instanceof Error ? err.message : String(err) });
+    void shutdown("uncaughtException");
+  });
 }
 
 // 仅当被直接运行时才启动；测试中 import 不会触发副作用

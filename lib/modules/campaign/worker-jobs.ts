@@ -10,14 +10,19 @@ import { renderSnapshotContent, type TemplateVariantContent } from "@/lib/module
 import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
 import { makeLocaleBlockResolver } from "@/lib/modules/template/service";
 import { campaignService } from "./service";
+import { campaignRepository } from "./repository";
+import { assertTransition, type CampaignTransitionReason } from "./state-machine";
 import { snapshotRecipients } from "./snapshot";
 import { transformHtml } from "./html-transform";
 import { environmentVariableService } from "@/lib/modules/environment-variable/service";
+import { audit } from "@/lib/audit";
+import { ConflictError } from "@/lib/errors";
 
 const log = logger.child("worker-jobs");
 const SYSTEM_CTX = { actorType: "SYSTEM" as const, req: null };
 const SEND_BATCH_SIZE = 100;
 const INTER_BATCH_DELAY_MS = 500;
+const WORKER_ID = `worker-${process.pid}`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,20 +37,35 @@ export async function scheduledCampaignTrigger(): Promise<void> {
   });
 
   for (const campaign of campaigns) {
+    const next: CampaignStatus = campaign.isAbTest ? "AB_TESTING" : "SENDING";
+    const reason: CampaignTransitionReason = campaign.isAbTest ? "ab_test_start" : "send";
     try {
+      assertTransition("SCHEDULED", next, reason);
+      // 快照与状态切换原子化：snapshot 成功但 transition 失败时，
+      // 不会留下 SCHEDULED + 已有快照的中间态导致下一轮重复发送。
       await prisma.$transaction(async (tx) => {
         await snapshotRecipients(campaign, tx);
+        const count = await campaignRepository.transitionStatus(
+          campaign.id,
+          "SCHEDULED",
+          next,
+          {},
+          tx,
+        );
+        if (count === 0) {
+          throw new ConflictError(
+            "Campaign status changed concurrently (expected SCHEDULED)",
+          );
+        }
       });
-      const next: CampaignStatus = campaign.isAbTest ? "AB_TESTING" : "SENDING";
-      const reason = campaign.isAbTest ? "ab_test_start" : "send";
-      await campaignService._transition(
-        campaign.id,
-        "SCHEDULED",
-        next,
-        reason as Parameters<typeof campaignService._transition>[3],
-        {},
-        SYSTEM_CTX,
-      );
+      audit({
+        action: `campaign.${reason}`,
+        entityType: "Campaign",
+        entityId: campaign.id,
+        actorType: SYSTEM_CTX.actorType,
+        details: { from: "SCHEDULED", to: next },
+        req: SYSTEM_CTX.req,
+      });
       log.info("scheduled campaign triggered", { campaignId: campaign.id, next });
     } catch (err) {
       log.error("scheduled campaign trigger failed", {
@@ -97,10 +117,10 @@ export async function processSendQueue(): Promise<void> {
 
   const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
     UPDATE campaign_recipients
-    SET status = 'SENDING', locked_at = NOW()
+    SET status = 'SENDING', "lockedAt" = NOW(), "lockedBy" = ${WORKER_ID}
     WHERE id IN (
       SELECT id FROM campaign_recipients
-      WHERE campaign_id = ${campaign.id} AND status = 'PENDING' AND locked_by IS NULL
+      WHERE "campaignId" = ${campaign.id} AND status = 'PENDING' AND "lockedBy" IS NULL
       ORDER BY id
       LIMIT ${SEND_BATCH_SIZE}
       FOR UPDATE SKIP LOCKED
@@ -125,6 +145,26 @@ export async function processSendQueue(): Promise<void> {
 
   for (const r of recipients) {
     try {
+      // 发送前最后一次可达性复检：快照之后用户可能退订/进抑制名单/退订主题。
+      // 与 automationRunProcessor 同级，命中则标记 UNSUBSCRIBED 而非发送（合规）。
+      const deliverability = await evaluateDeliverability(r.user.id, {
+        categorySlug: campaign.subscriptionCategory ?? null,
+        topicId: campaign.topicId ?? null,
+      });
+      if (!deliverability.allowed || (await isSuppressed(r.user.email))) {
+        await prisma.campaignRecipient.update({
+          where: { id: r.id },
+          data: {
+            status: "UNSUBSCRIBED",
+            unsubscribedAt: new Date(),
+            lockedBy: null,
+            lockedAt: null,
+            metadata: { skippedReason: deliverability.reason ?? "suppressed" },
+          },
+        });
+        continue;
+      }
+
       const unsubscribeUrl = `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}`;
       const unsubscribeTopicUrl = campaign.topic
         ? `${appUrl}/api/unsubscribe?token=${r.user.unsubscribeToken}&topic=${encodeURIComponent(campaign.topic.slug)}`
@@ -189,6 +229,8 @@ export async function processSendQueue(): Promise<void> {
         data: {
           status: "FAILED",
           failedAt: new Date(),
+          lockedBy: null,
+          lockedAt: null,
           metadata: {
             error: err instanceof Error ? err.message : "render_failed",
           },
@@ -216,6 +258,12 @@ export async function processSendQueue(): Promise<void> {
       campaignId: campaign.id,
       channelId: campaign.sendingChannelId,
       error: err instanceof Error ? err.message : String(err),
+    });
+    // 通道构建失败发生在任何发送之前，可安全地把已认领收件人回退为 PENDING，
+    // 避免它们卡在 SENDING 直到 leaseRecover（5 分钟）才恢复。
+    await prisma.campaignRecipient.updateMany({
+      where: { id: { in: recipientMap.map((r) => r.recipientId) } },
+      data: { status: "PENDING", lockedBy: null, lockedAt: null },
     });
     return;
   }
@@ -472,11 +520,11 @@ export async function birthdayChecker(): Promise<void> {
 
   const users = await prisma.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM users
-    WHERE birth_date IS NOT NULL
-      AND EXTRACT(MONTH FROM birth_date) = ${month}
-      AND EXTRACT(DAY FROM birth_date) = ${day}
+    WHERE "birthDate" IS NOT NULL
+      AND EXTRACT(MONTH FROM "birthDate") = ${month}
+      AND EXTRACT(DAY FROM "birthDate") = ${day}
       AND unsubscribed = false
-      AND total_bounce_count < 3
+      AND "totalBounceCount" < 3
   `;
 
   for (const auto of automations) {
@@ -559,7 +607,7 @@ export async function domainStatAggregator(): Promise<void> {
       COUNT(*) FILTER (WHERE cr.status IN ('BOUNCED','SOFT_BOUNCED')) AS total_bounced,
       COUNT(*) FILTER (WHERE cr.status = 'COMPLAINED') AS total_complained
     FROM campaign_recipients cr
-    JOIN users u ON u.id = cr.user_id
+    JOIN users u ON u.id = cr."userId"
     WHERE cr.status NOT IN ('PENDING','SENDING')
     GROUP BY SPLIT_PART(u.email, '@', 2)
     HAVING COUNT(*) > 0
@@ -612,15 +660,15 @@ export async function deliverabilityAlertChecker(): Promise<void> {
 
 export async function sendTimePreferenceCalculator(): Promise<void> {
   const rows = await prisma.$queryRaw<Array<{ user_id: string; best_hour: number }>>`
-    SELECT DISTINCT ON (cr.user_id)
-      cr.user_id,
-      EXTRACT(HOUR FROM ee.processed_at)::int AS best_hour
+    SELECT DISTINCT ON (cr."userId")
+      cr."userId" AS user_id,
+      EXTRACT(HOUR FROM ee."processedAt")::int AS best_hour
     FROM email_events ee
-    JOIN campaign_recipients cr ON cr.id = ee.campaign_recipient_id
+    JOIN campaign_recipients cr ON cr.id = ee."campaignRecipientId"
     WHERE ee.type IN ('opened', 'clicked')
-      AND ee.processed_at > NOW() - INTERVAL '90 days'
-    GROUP BY cr.user_id, EXTRACT(HOUR FROM ee.processed_at)
-    ORDER BY cr.user_id, COUNT(*) DESC
+      AND ee."processedAt" > NOW() - INTERVAL '90 days'
+    GROUP BY cr."userId", EXTRACT(HOUR FROM ee."processedAt")
+    ORDER BY cr."userId", COUNT(*) DESC
   `;
   for (const r of rows) {
     await prisma.sendTimePreference.upsert({

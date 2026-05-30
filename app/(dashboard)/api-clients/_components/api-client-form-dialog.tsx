@@ -52,7 +52,8 @@ function rowToForm(row: ApiClientRow | null | undefined): FormShape {
     ipWhitelistText: ipWhitelistToText(row?.ipWhitelist),
     rpsLimit: row?.rpsLimit != null ? String(row.rpsLimit) : "",
     rphLimit: row?.rphLimit != null ? String(row.rphLimit) : "",
-    enableHmac: row?.hmacEnabled ?? false,
+    // 创建时默认开启 HMAC，与后端默认保持一致（更安全的基线）。
+    enableHmac: row?.hmacEnabled ?? true,
   };
 }
 
@@ -237,7 +238,7 @@ export function ApiClientFormDialog({
                 }
               />
               <Label htmlFor="ac-hmac" className="cursor-pointer">
-                启用 HMAC 签名（仅创建时返回 secret）
+                启用 HMAC 签名（默认开启，仅创建时返回 secret）
               </Label>
             </div>
           ) : null}

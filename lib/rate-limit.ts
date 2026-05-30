@@ -42,5 +42,12 @@ export function __resetRateLimiters(): void {
   registry.clear();
 }
 
+const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+if (process.env.NODE_ENV !== "test" && !process.env.VITEST) {
+  setInterval(() => {
+    for (const rl of registry.values()) rl.sweep();
+  }, SWEEP_INTERVAL_MS).unref?.();
+}
+
 export type { RateLimiter, RateLimitConfig, RateLimitDecision };
 export { getClientIp };

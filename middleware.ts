@@ -3,7 +3,7 @@ import { SESSION_COOKIE_NAME, verifySession } from "@/lib/auth/session";
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|api/track|api/unsubscribe|api/webhooks|api/health|api/preferences|api/events|preferences|unsubscribe|login).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/track|api/unsubscribe|api/webhooks|api/health|api/preferences|preferences|unsubscribe|login).*)",
   ],
 };
 
@@ -16,7 +16,6 @@ const PUBLIC_API_PREFIXES = [
   "/api/health",
   "/api/confirm",
   "/api/preferences",
-  "/api/events",
   "/api/inbound",
 ];
 
@@ -47,7 +46,10 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (authenticated) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
-    return NextResponse.json({ ok: false, error: "unauthenticated" }, { status: 401 });
+    return NextResponse.json(
+      { ok: false, error: "unauthenticated", code: "unauthenticated" },
+      { status: 401 },
+    );
   }
   const url = req.nextUrl.clone();
   url.pathname = "/login";

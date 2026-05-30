@@ -16,7 +16,6 @@ export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
     ok: true,
     authenticated: true,
-    sessionId: payload.sessionId,
     exp: payload.exp,
   });
 }

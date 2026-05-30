@@ -201,9 +201,9 @@ export const userRepository = {
     await db.userTag.deleteMany({ where: { userId, tagId } });
   },
 
-  async listIds(query: Omit<ListUsersQuery, "page" | "pageSize" | "sortBy" | "sortDir">, db: PrismaTx = prisma): Promise<string[]> {
+  async listIds(query: Omit<ListUsersQuery, "page" | "pageSize" | "sortBy" | "sortDir">, db: PrismaTx = prisma, take?: number): Promise<string[]> {
     const where = buildWhere({ ...query, page: 1, pageSize: 1, sortBy: "createdAt", sortDir: "desc" });
-    const rows = await db.user.findMany({ where, select: { id: true } });
+    const rows = await db.user.findMany({ where, select: { id: true }, ...(take ? { take } : {}) });
     return rows.map((r) => r.id);
   },
 

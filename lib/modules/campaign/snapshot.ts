@@ -3,7 +3,7 @@ import { env } from "@/lib/env";
 import { ValidationError } from "@/lib/errors";
 import { compileSegmentCondition } from "@/lib/modules/segment/compiler";
 import { isSuppressed } from "@/lib/modules/suppression/check";
-import { isOverLimit } from "@/lib/modules/frequency/check";
+import { frequencyRepository } from "@/lib/modules/frequency/repository";
 import { resolveLocale } from "@/lib/modules/template/render";
 import type { TemplateSnapshot } from "@/lib/modules/template/snapshot";
 import type { PrismaTx } from "../user/repository";
@@ -42,6 +42,15 @@ export async function snapshotRecipients(
   campaign: CampaignForSnapshot,
   tx: PrismaTx,
 ): Promise<{ totalRecipients: number }> {
+  // 幂等：若该活动已存在收件人快照（例如定时触发重试、并发重复进入），
+  // 直接返回已有数量，避免重复插入与重复发送。
+  const existingCount = await tx.campaignRecipient.count({
+    where: { campaignId: campaign.id },
+  });
+  if (existingCount > 0) {
+    return { totalRecipients: existingCount };
+  }
+
   const where: Prisma.UserWhereInput = {
     unsubscribed: false,
     totalBounceCount: { lt: 3 },
@@ -107,14 +116,34 @@ export async function snapshotRecipients(
     select: { id: true, email: true, locale: true },
   });
 
+  // 频次上限：单条 active 配置取一次；窗口内计数按整批 groupBy 一次查询，
+  // 替代逐用户 count，消除 N+1。无配置时跳过频次过滤。
+  const cap = await frequencyRepository.findActive(tx);
+  const freqSince = cap
+    ? new Date(Date.now() - cap.periodDays * 24 * 60 * 60 * 1000)
+    : null;
+
   const filtered: EligibleUser[] = [];
   const BATCH_SIZE = 500;
   for (let i = 0; i < users.length; i += BATCH_SIZE) {
     const batch = users.slice(i, i + BATCH_SIZE);
+
+    const overLimitIds = new Set<string>();
+    if (cap && freqSince) {
+      const grouped = await tx.campaignRecipient.groupBy({
+        by: ["userId"],
+        where: { userId: { in: batch.map((u) => u.id) }, sentAt: { gte: freqSince } },
+        _count: true,
+      });
+      for (const g of grouped) {
+        if (g._count >= cap.maxEmails) overLimitIds.add(g.userId);
+      }
+    }
+
     const results = await Promise.all(
       batch.map(async (u) => {
+        if (overLimitIds.has(u.id)) return null;
         if (await isSuppressed(u.email)) return null;
-        if (await isOverLimit(u.id)) return null;
         return u;
       }),
     );
