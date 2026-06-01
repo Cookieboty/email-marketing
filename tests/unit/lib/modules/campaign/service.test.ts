@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   recipientUpdateMany: vi.fn(),
   variantCreateMany: vi.fn(),
+  campaignUpdateMany: vi.fn(),
 }));
 
 vi.mock("@/lib/audit", () => ({
@@ -61,6 +62,7 @@ vi.mock("@/lib/prisma", () => ({
       fn({
         campaignRecipient: { updateMany: h.recipientUpdateMany },
         campaignVariant: { createMany: h.variantCreateMany },
+        campaign: { updateMany: h.campaignUpdateMany },
       }),
     ),
   },
@@ -233,7 +235,20 @@ describe("campaignService.update — FAILED 状态编辑限制", () => {
     expect(data.fromEmail).toBe("New Channel <new@example.com>");
   });
 
-  it("SENDING 等其它状态拒绝编辑", async () => {
+  it("COMPLETED（已完成但有失败）也允许修改发送设置", async () => {
+    repo.findById.mockResolvedValue(fakeCampaign({ status: "COMPLETED" }) as never);
+
+    await expect(
+      campaignService.update(
+        "camp1",
+        { fromEmail: "Fixed <fixed@example.com>" } as never,
+        ctx,
+      ),
+    ).resolves.toBeDefined();
+    expect(repo.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("SENDING 状态拒绝编辑", async () => {
     repo.findById.mockResolvedValue(fakeCampaign({ status: "SENDING" }) as never);
 
     await expect(
@@ -244,46 +259,70 @@ describe("campaignService.update — FAILED 状态编辑限制", () => {
 });
 
 describe("campaignService.retry", () => {
+  beforeEach(() => {
+    h.recipientUpdateMany.mockResolvedValue({ count: 5 });
+    h.campaignUpdateMany.mockResolvedValue({ count: 1 });
+  });
+
   it("FAILED 时重置失败/软退信收件人并切回 SENDING", async () => {
     repo.findById
       .mockResolvedValueOnce(fakeCampaign({ status: "FAILED" }) as never)
       .mockResolvedValueOnce(fakeCampaign({ status: "SENDING", failedCount: 0 }) as never);
-    repo.transitionStatus.mockResolvedValue(1);
 
     const result = await campaignService.retry("camp1", ctx);
 
     expect(h.recipientUpdateMany).toHaveBeenCalledTimes(1);
-    const args = h.recipientUpdateMany.mock.calls[0]![0] as {
+    const recipArgs = h.recipientUpdateMany.mock.calls[0]![0] as {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
     };
-    expect(args.where).toMatchObject({
+    expect(recipArgs.where).toMatchObject({
       campaignId: "camp1",
       status: { in: ["FAILED", "SOFT_BOUNCED"] },
     });
-    expect(args.data).toMatchObject({ status: "PENDING", retryCount: 0 });
+    expect(recipArgs.data).toMatchObject({ status: "PENDING", retryCount: 0 });
 
-    expect(repo.transitionStatus).toHaveBeenCalledWith(
-      "camp1",
-      "FAILED",
-      "SENDING",
-      { failedCount: 0 },
-      expect.anything(),
-    );
+    const campArgs = h.campaignUpdateMany.mock.calls[0]![0] as {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    };
+    expect(campArgs.where).toMatchObject({ id: "camp1", status: "FAILED" });
+    expect(campArgs.data).toMatchObject({ status: "SENDING", failedCount: 0 });
     expect(result.status).toBe("SENDING");
   });
 
-  it("非 FAILED 状态拒绝重试", async () => {
-    repo.findById.mockResolvedValue(fakeCampaign({ status: "COMPLETED" }) as never);
+  it("COMPLETED（已完成但有失败）也可重发失败收件人", async () => {
+    repo.findById
+      .mockResolvedValueOnce(fakeCampaign({ status: "COMPLETED" }) as never)
+      .mockResolvedValueOnce(fakeCampaign({ status: "SENDING", failedCount: 0 }) as never);
+
+    await campaignService.retry("camp1", ctx);
+
+    const campArgs = h.campaignUpdateMany.mock.calls[0]![0] as {
+      where: Record<string, unknown>;
+    };
+    expect(campArgs.where).toMatchObject({ id: "camp1", status: "COMPLETED" });
+  });
+
+  it("DRAFT 等未发送状态拒绝重试", async () => {
+    repo.findById.mockResolvedValue(fakeCampaign({ status: "DRAFT" }) as never);
 
     await expect(campaignService.retry("camp1", ctx)).rejects.toThrow(ValidationError);
     expect(h.recipientUpdateMany).not.toHaveBeenCalled();
-    expect(repo.transitionStatus).not.toHaveBeenCalled();
+    expect(h.campaignUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("乐观锁冲突（transition count=0）抛 ConflictError", async () => {
+  it("没有可重发的失败收件人时抛 ValidationError 且不改状态", async () => {
     repo.findById.mockResolvedValue(fakeCampaign({ status: "FAILED" }) as never);
-    repo.transitionStatus.mockResolvedValue(0);
+    h.recipientUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(campaignService.retry("camp1", ctx)).rejects.toThrow(ValidationError);
+    expect(h.campaignUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("乐观锁冲突（campaign updateMany count=0）抛 ConflictError", async () => {
+    repo.findById.mockResolvedValue(fakeCampaign({ status: "FAILED" }) as never);
+    h.campaignUpdateMany.mockResolvedValue({ count: 0 });
 
     await expect(campaignService.retry("camp1", ctx)).rejects.toThrow(ConflictError);
   });

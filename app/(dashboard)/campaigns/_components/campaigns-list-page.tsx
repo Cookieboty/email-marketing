@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Pagination } from "@/components/pagination";
-import { apiDelete, swrFetcher } from "@/lib/api-client";
+import { apiDelete, apiPost, swrFetcher } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useDebouncedValue } from "@/lib/hooks/use-debounced-value";
 
@@ -39,6 +39,7 @@ interface CampaignItem {
   openCount: number;
   clickCount: number;
   bouncedCount: number;
+  failedCount: number;
   scheduledAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -80,9 +81,39 @@ export default function CampaignsListPage() {
   });
 
   const [deleting, setDeleting] = useState<CampaignItem | null>(null);
+  // 重试需要两次确认：retryStep 1 = 第一次，2 = 第二次，0 = 关闭。
+  const [retryTarget, setRetryTarget] = useState<CampaignItem | null>(null);
+  const [retryStep, setRetryStep] = useState<0 | 1 | 2>(0);
+  const [retrying, setRetrying] = useState(false);
 
   const total = data?.total ?? 0;
   const items = data?.data ?? [];
+
+  function canEditSendConfig(c: CampaignItem): boolean {
+    return ["FAILED", "COMPLETED", "PAUSED"].includes(c.status);
+  }
+  function canRetry(c: CampaignItem): boolean {
+    return (
+      c.failedCount > 0 &&
+      ["FAILED", "COMPLETED", "PAUSED", "SENDING"].includes(c.status)
+    );
+  }
+
+  async function handleRetry() {
+    if (!retryTarget) return;
+    setRetrying(true);
+    try {
+      await apiPost(`/api/campaigns/${retryTarget.id}/retry`);
+      toast({ title: "已开始重发失败收件人" });
+      await mutate();
+    } catch (e) {
+      toast({ title: "重试失败", description: asMessage(e), variant: "destructive" });
+    } finally {
+      setRetrying(false);
+      setRetryStep(0);
+      setRetryTarget(null);
+    }
+  }
 
   return (
     <section className="space-y-4">
@@ -201,6 +232,26 @@ export default function CampaignsListPage() {
                   >
                     详情
                   </Link>
+                  {canEditSendConfig(c) && (
+                    <Link
+                      href={`/campaigns/${c.id}?edit=1`}
+                      className={buttonVariants({ variant: "outline", size: "sm" })}
+                      data-testid={`campaign-edit-${c.id}`}
+                    >
+                      编辑
+                    </Link>
+                  )}
+                  {canRetry(c) && (
+                    <Button
+                      type="button"
+                      variant="default"
+                      size="sm"
+                      onClick={() => { setRetryTarget(c); setRetryStep(1); }}
+                      data-testid={`campaign-retry-${c.id}`}
+                    >
+                      重试
+                    </Button>
+                  )}
                   {c.status === "DRAFT" && (
                     <Button
                       type="button"
@@ -245,6 +296,29 @@ export default function CampaignsListPage() {
             setDeleting(null);
           }
         }}
+      />
+
+      <ConfirmDialog
+        open={retryStep === 1}
+        title="重试发送"
+        description={
+          retryTarget
+            ? `将把「${retryTarget.name}」中 ${retryTarget.failedCount} 个发送失败的收件人重新加入发送队列。确认继续？`
+            : ""
+        }
+        confirmLabel="继续"
+        onOpenChange={(o) => { if (!o) { setRetryStep(0); setRetryTarget(null); } }}
+        onConfirm={() => setRetryStep(2)}
+      />
+
+      <ConfirmDialog
+        open={retryStep === 2}
+        title="再次确认重试"
+        description="确定后将立即开始重新发送，无法撤销。是否立即发送？"
+        confirmLabel="立即发送"
+        loading={retrying}
+        onOpenChange={(o) => { if (!o && !retrying) { setRetryStep(0); setRetryTarget(null); } }}
+        onConfirm={handleRetry}
       />
     </section>
   );

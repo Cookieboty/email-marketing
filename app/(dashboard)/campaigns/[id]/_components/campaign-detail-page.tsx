@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -22,7 +22,7 @@ import { useToast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { apiPost, apiPatch, apiDelete, swrFetcher } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
   DRAFT: { label: "草稿", variant: "secondary" },
@@ -98,6 +98,7 @@ function pct(num: number, den: number): string {
 
 export default function CampaignDetailPage({ id }: { id: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { toast } = useToast();
   const [busy, setBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<{ label: string; action: string; destructive?: boolean } | null>(null);
@@ -131,6 +132,23 @@ export default function CampaignDetailPage({ id }: { id: string }) {
   );
   const activeChannels =
     channelsData?.data?.filter((ch) => ch.status === "ACTIVE") ?? [];
+
+  // 从列表页带 ?edit=1 进入时自动打开"编辑发送设置"弹窗。
+  const [editAutoHandled, setEditAutoHandled] = useState(false);
+  useEffect(() => {
+    if (
+      !editAutoHandled &&
+      c &&
+      searchParams.get("edit") === "1" &&
+      ["FAILED", "COMPLETED", "PAUSED"].includes(c.status)
+    ) {
+      setEditChannelId(c.sendingChannelId ?? "");
+      setEditFromEmail(c.fromEmail ?? "");
+      setEditReplyTo(c.replyTo ?? "");
+      setEditOpen(true);
+      setEditAutoHandled(true);
+    }
+  }, [c, searchParams, editAutoHandled]);
 
   async function runAction(action: string) {
     setBusy(true);
@@ -264,10 +282,16 @@ export default function CampaignDetailPage({ id }: { id: string }) {
       actions.push({ label: "取消", action: "cancel", destructive: true });
       break;
     case "FAILED":
-      actions.push({ label: "重试", action: "retry" });
       actions.push({ label: "取消", action: "cancel", destructive: true });
       break;
   }
+
+  // 重试 / 编辑发送设置基于"是否有失败收件人"和状态决定，而非仅 FAILED 状态：
+  // 失败的活动常以 COMPLETED（带 failedCount）或 PAUSED 出现。
+  const canEditSendConfig = ["FAILED", "COMPLETED", "PAUSED"].includes(c.status);
+  const canRetry =
+    c.failedCount > 0 &&
+    ["FAILED", "COMPLETED", "PAUSED", "SENDING"].includes(c.status);
 
   const stats = [
     { title: "总收件人", value: c.totalRecipients },
@@ -309,7 +333,7 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               定时发送
             </Button>
           )}
-          {c.status === "FAILED" && (
+          {canEditSendConfig && (
             <Button
               variant="outline"
               size="sm"
@@ -320,6 +344,17 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               编辑发送设置
             </Button>
           )}
+          {canRetry && (
+            <Button
+              variant="default"
+              size="sm"
+              disabled={busy}
+              onClick={() => setRetryStep(1)}
+              data-testid="action-retry"
+            >
+              重试失败收件人
+            </Button>
+          )}
           {actions.map((a) => (
             <Button
               key={a.action}
@@ -327,9 +362,7 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               size="sm"
               disabled={busy}
               onClick={() => {
-                if (a.action === "retry") {
-                  setRetryStep(1);
-                } else if (a.destructive) {
+                if (a.destructive) {
                   setConfirmAction(a);
                 } else {
                   void runAction(a.action);

@@ -51,11 +51,29 @@ interface ActorContext {
   req?: { headers: Headers } | null;
 }
 
-/** FAILED 状态下仅允许修正这些与发送相关的字段（不影响已生成的收件人快照）。 */
-const FAILED_EDITABLE_FIELDS = new Set<string>([
+/**
+ * 已发送过的活动只允许修正这些与"发送"相关的字段（不影响已生成的收件人快照），
+ * 便于发送失败后改对发件人 / 渠道再重试。
+ */
+const SEND_CONFIG_FIELDS = new Set<string>([
   "fromEmail",
   "replyTo",
   "sendingChannelId",
+]);
+
+/** 允许仅编辑发送相关字段的非草稿状态（发送失败 / 已完成但有失败 / 暂停）。 */
+const SEND_CONFIG_EDITABLE_STATUSES = new Set<CampaignStatus>([
+  "FAILED",
+  "COMPLETED",
+  "PAUSED",
+]);
+
+/** 允许"重发失败收件人"的状态：已经进入过发送流程、且可能存在失败的收件人。 */
+const RETRYABLE_STATUSES = new Set<CampaignStatus>([
+  "FAILED",
+  "COMPLETED",
+  "PAUSED",
+  "SENDING",
 ]);
 
 interface ChannelFromShape {
@@ -276,15 +294,15 @@ export const campaignService = {
     const existing = await campaignRepository.findById(id);
     if (!existing) throw new NotFoundError("Campaign not found");
     if (existing.status !== "DRAFT" && existing.status !== "SCHEDULED") {
-      if (existing.status === "FAILED") {
-        // 发送失败后，允许在重试前修正发送相关设置（发件人/回复地址/发送渠道）。
+      if (SEND_CONFIG_EDITABLE_STATUSES.has(existing.status)) {
+        // 已发送过的活动，允许在重发前修正发送相关设置（发件人/回复地址/发送渠道）。
         // 这些字段不影响已生成的收件人快照，可安全修改。
         const illegal = Object.keys(input).filter(
-          (k) => !FAILED_EDITABLE_FIELDS.has(k),
+          (k) => !SEND_CONFIG_FIELDS.has(k),
         );
         if (illegal.length > 0) {
           throw new ValidationError(
-            `Campaign in FAILED status only allows editing ${[...FAILED_EDITABLE_FIELDS].join(", ")} (got: ${illegal.join(", ")})`,
+            `Campaign in status ${existing.status} only allows editing ${[...SEND_CONFIG_FIELDS].join(", ")} (got: ${illegal.join(", ")})`,
           );
         }
       } else {
@@ -536,23 +554,28 @@ export const campaignService = {
   },
 
   /**
-   * 重试发送失败的活动：把失败 / 软退信的收件人重置为待发（清空重试计数与锁），
-   * 并将活动从 FAILED 切回 SENDING，由 worker 重新认领发送。
-   * 已成功（SENT/DELIVERED/OPENED/CLICKED）、硬退信、退订的收件人保持不变，
-   * 避免重复投递。
+   * 重发活动中发送失败的收件人：把状态为 FAILED / SOFT_BOUNCED 的收件人重置为待发
+   * （清空重试计数与锁），并把活动切回 SENDING，由 worker 重新认领发送。
+   *
+   * 说明：
+   *  - 适用于 FAILED / COMPLETED（已完成但有失败）/ PAUSED / SENDING 状态——这些
+   *    都已进入过发送流程，可能残留失败收件人。COMPLETED 虽是终态，但"重发失败"是
+   *    运营的明确动作，这里直接复位状态（带乐观锁），不走常规状态机。
+   *  - 已成功（SENT/DELIVERED/OPENED/CLICKED）、硬退信、退订的收件人保持不变，
+   *    避免重复投递。
+   *  - 没有可重发的失败收件人时抛 ValidationError（事务回滚，不改任何状态）。
    */
   async retry(id: string, ctx: ActorContext): Promise<Campaign> {
     const existing = await campaignRepository.findById(id);
     if (!existing) throw new NotFoundError("Campaign not found");
-    if (existing.status !== "FAILED") {
+    if (!RETRYABLE_STATUSES.has(existing.status)) {
       throw new ValidationError(
-        `Only FAILED campaigns can be retried; current status is ${existing.status}`,
+        `Cannot retry campaign in status ${existing.status}`,
       );
     }
-    assertTransition("FAILED", "SENDING", "retry");
 
     await prisma.$transaction(async (tx) => {
-      await tx.campaignRecipient.updateMany({
+      const reset = await tx.campaignRecipient.updateMany({
         where: {
           campaignId: id,
           status: { in: ["FAILED", "SOFT_BOUNCED"] },
@@ -566,16 +589,17 @@ export const campaignService = {
           nextRetryAt: null,
         },
       });
-      const count = await campaignRepository.transitionStatus(
-        id,
-        "FAILED",
-        "SENDING",
-        { failedCount: 0 },
-        tx,
-      );
-      if (count === 0) {
+      if (reset.count === 0) {
+        throw new ValidationError("No failed recipients to retry");
+      }
+      // 乐观锁：以当前状态为前提切回 SENDING，并清零 failedCount（由统计任务后续重算）。
+      const updated = await tx.campaign.updateMany({
+        where: { id, status: existing.status },
+        data: { status: "SENDING", failedCount: 0 },
+      });
+      if (updated.count === 0) {
         throw new ConflictError(
-          "Campaign status changed concurrently (expected FAILED)",
+          `Campaign status changed concurrently (expected ${existing.status})`,
         );
       }
     });
@@ -587,7 +611,7 @@ export const campaignService = {
       entityType: "Campaign",
       entityId: id,
       actorType: ctx.actorType,
-      details: { from: "FAILED", to: "SENDING" },
+      details: { from: existing.status, to: "SENDING" },
       req: ctx.req ?? null,
     });
     return fresh;
