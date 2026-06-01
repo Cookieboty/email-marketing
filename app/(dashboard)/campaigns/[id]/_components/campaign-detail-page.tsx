@@ -20,7 +20,7 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { apiPost, apiDelete, swrFetcher } from "@/lib/api-client";
+import { apiPost, apiPatch, apiDelete, swrFetcher } from "@/lib/api-client";
 import { swrKeys } from "@/lib/swr-keys";
 import { useState } from "react";
 
@@ -34,6 +34,14 @@ const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secon
   FAILED: { label: "失败", variant: "destructive" },
   CANCELLED: { label: "已取消", variant: "secondary" },
 };
+
+interface ChannelOption {
+  id: string;
+  name: string;
+  providerType: string;
+  fromEmail: string | null;
+  status: string;
+}
 
 interface CampaignVariant {
   id: string;
@@ -52,6 +60,7 @@ interface CampaignDetail {
   status: string;
   fromEmail: string;
   replyTo: string | null;
+  sendingChannelId: string | null;
   templateId: string;
   segmentId: string | null;
   tagFilter: string[];
@@ -99,6 +108,13 @@ export default function CampaignDetailPage({ id }: { id: string }) {
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [scheduleAt, setScheduleAt] = useState("");
   const [scheduling, setScheduling] = useState(false);
+  // 重试需要两次确认：1 = 第一次确认，2 = 第二次确认，0 = 关闭。
+  const [retryStep, setRetryStep] = useState<0 | 1 | 2>(0);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editChannelId, setEditChannelId] = useState("");
+  const [editFromEmail, setEditFromEmail] = useState("");
+  const [editReplyTo, setEditReplyTo] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   const { data: c, isLoading, mutate } = useSWR<CampaignDetail>(
     swrKeys.campaign(id),
@@ -108,6 +124,13 @@ export default function CampaignDetailPage({ id }: { id: string }) {
         data?.status === "SENDING" || data?.status === "AB_TESTING" ? 10000 : 0,
     },
   );
+
+  const { data: channelsData } = useSWR<{ data: ChannelOption[] }>(
+    "/api/sending-channels",
+    swrFetcher,
+  );
+  const activeChannels =
+    channelsData?.data?.filter((ch) => ch.status === "ACTIVE") ?? [];
 
   async function runAction(action: string) {
     setBusy(true);
@@ -171,6 +194,40 @@ export default function CampaignDetailPage({ id }: { id: string }) {
       toast({ title: "定时发送设置失败", description: asMessage(e), variant: "destructive" });
     } finally {
       setScheduling(false);
+    }
+  }
+
+  function openEdit() {
+    if (!c) return;
+    setEditChannelId(c.sendingChannelId ?? "");
+    setEditFromEmail(c.fromEmail ?? "");
+    setEditReplyTo(c.replyTo ?? "");
+    setEditOpen(true);
+  }
+
+  async function handleEditSave() {
+    if (!editChannelId) {
+      toast({ title: "请选择发送渠道", variant: "destructive" });
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const payload: {
+        sendingChannelId: string;
+        fromEmail?: string;
+        replyTo?: string;
+      } = { sendingChannelId: editChannelId };
+      // 发件人留空 => 不提交该字段，后端按所选渠道默认发件人重新解析。
+      if (editFromEmail.trim()) payload.fromEmail = editFromEmail.trim();
+      if (editReplyTo.trim()) payload.replyTo = editReplyTo.trim();
+      await apiPatch(`/api/campaigns/${id}`, payload);
+      toast({ title: "已保存发送设置" });
+      setEditOpen(false);
+      await mutate();
+    } catch (e) {
+      toast({ title: "保存失败", description: asMessage(e), variant: "destructive" });
+    } finally {
+      setEditSaving(false);
     }
   }
 
@@ -252,6 +309,17 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               定时发送
             </Button>
           )}
+          {c.status === "FAILED" && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={openEdit}
+              data-testid="action-edit"
+            >
+              编辑发送设置
+            </Button>
+          )}
           {actions.map((a) => (
             <Button
               key={a.action}
@@ -259,7 +327,9 @@ export default function CampaignDetailPage({ id }: { id: string }) {
               size="sm"
               disabled={busy}
               onClick={() => {
-                if (a.destructive) {
+                if (a.action === "retry") {
+                  setRetryStep(1);
+                } else if (a.destructive) {
                   setConfirmAction(a);
                 } else {
                   void runAction(a.action);
@@ -381,6 +451,100 @@ export default function CampaignDetailPage({ id }: { id: string }) {
           if (confirmAction) await runAction(confirmAction.action);
         }}
       />
+
+      <ConfirmDialog
+        open={retryStep === 1}
+        title="重试发送"
+        description={`将把 ${c.failedCount} 个发送失败的收件人重新加入发送队列。确认继续？`}
+        confirmLabel="继续"
+        onOpenChange={(o) => { if (!o) setRetryStep(0); }}
+        onConfirm={async () => {
+          setRetryStep(2);
+        }}
+      />
+
+      <ConfirmDialog
+        open={retryStep === 2}
+        title="再次确认重试"
+        description="确定后将立即开始重新发送，无法撤销。是否立即发送？"
+        confirmLabel="立即发送"
+        loading={busy}
+        onOpenChange={(o) => { if (!o && !busy) setRetryStep(0); }}
+        onConfirm={async () => {
+          await runAction("retry");
+          setRetryStep(0);
+        }}
+      />
+
+      <Dialog
+        open={editOpen}
+        onOpenChange={(o) => { if (!o) setEditOpen(false); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑发送设置</DialogTitle>
+            <DialogDescription>
+              修正发送渠道与发件人后即可重试发送（不会改变收件人列表）。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-channel">发送渠道</Label>
+              <Select
+                id="edit-channel"
+                value={editChannelId}
+                onChange={(e) => setEditChannelId(e.target.value)}
+                data-testid="campaign-edit-channel"
+              >
+                <option value="">请选择发送渠道</option>
+                {activeChannels.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    {ch.name}（{ch.providerType}
+                    {ch.fromEmail ? ` - ${ch.fromEmail}` : ""}）
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-from">发件人邮箱</Label>
+              <Input
+                id="edit-from"
+                value={editFromEmail}
+                onChange={(e) => setEditFromEmail(e.target.value)}
+                placeholder="留空则使用所选渠道的默认发件人"
+                data-testid="campaign-edit-from"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-reply-to">回复邮箱</Label>
+              <Input
+                id="edit-reply-to"
+                type="email"
+                value={editReplyTo}
+                onChange={(e) => setEditReplyTo(e.target.value)}
+                placeholder="可选"
+                data-testid="campaign-edit-reply-to"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditOpen(false)}
+              disabled={editSaving}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleEditSave}
+              disabled={editSaving}
+              data-testid="campaign-edit-submit"
+            >
+              {editSaving ? "保存中..." : "保存"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={testSendOpen}

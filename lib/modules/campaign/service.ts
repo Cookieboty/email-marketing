@@ -51,6 +51,56 @@ interface ActorContext {
   req?: { headers: Headers } | null;
 }
 
+/** FAILED 状态下仅允许修正这些与发送相关的字段（不影响已生成的收件人快照）。 */
+const FAILED_EDITABLE_FIELDS = new Set<string>([
+  "fromEmail",
+  "replyTo",
+  "sendingChannelId",
+]);
+
+interface ChannelFromShape {
+  fromEmail: string | null;
+  fromName: string | null;
+  smtpConfig?: { fromEmail: string; fromName: string | null } | null;
+}
+
+/**
+ * 解析发送渠道的 From 头：优先渠道级 fromEmail/fromName，其次回退到 SMTP 配置级
+ * （Resend 配置没有 from 字段，必须在渠道级配置）。无可用地址时返回 null。
+ */
+function resolveChannelFromHeader(channel: ChannelFromShape): string | null {
+  const email = channel.fromEmail ?? channel.smtpConfig?.fromEmail ?? null;
+  if (!email) return null;
+  const name = channel.fromName ?? channel.smtpConfig?.fromName ?? null;
+  return name ? `${name} <${email}>` : email;
+}
+
+/**
+ * 解析活动最终使用的发件人，顺序：
+ *  1. 显式传入的 fromEmail（运营在表单填写）；
+ *  2. 所选发送渠道的发件人（渠道级 → SMTP 配置级）；
+ *  3. EMAIL_FROM 环境变量兜底。
+ * 这样"留空发件人"时会使用当前渠道的发件人，而不是环境变量的占位地址。
+ */
+async function resolveCampaignFromEmail(
+  explicit: string | undefined,
+  sendingChannelId: string | null,
+): Promise<string | undefined> {
+  const trimmed = explicit?.trim();
+  if (trimmed) return trimmed;
+  if (sendingChannelId) {
+    const channel = await prisma.sendingChannel.findUnique({
+      where: { id: sendingChannelId },
+      include: { smtpConfig: true },
+    });
+    if (channel) {
+      const resolved = resolveChannelFromHeader(channel);
+      if (resolved) return resolved;
+    }
+  }
+  return env().EMAIL_FROM ?? undefined;
+}
+
 /**
  * 规整 Campaign.subjects 覆盖 JSON。语义：
  *  - 输入对象**整体替换**已有 subjects（非按 locale 合并）；UI 表单始终带全部 locale
@@ -137,15 +187,18 @@ export const campaignService = {
       throw new ValidationError("forcedLocale content is missing from template");
     }
 
-    const fromEmail = input.fromEmail ?? env().EMAIL_FROM;
+    const fromEmail = await resolveCampaignFromEmail(
+      input.fromEmail,
+      input.sendingChannelId ?? null,
+    );
     if (!fromEmail) {
       throw new ValidationError(
-        "fromEmail is required (no EMAIL_FROM env configured)",
+        "fromEmail is required: provide it explicitly, configure the sending channel's fromEmail, or set EMAIL_FROM env",
       );
     }
     if (!isValidFromHeader(fromEmail)) {
       throw new ValidationError(
-        "fromEmail (or EMAIL_FROM env) is not a valid email/header",
+        "Resolved fromEmail is not a valid email/header",
       );
     }
 
@@ -223,9 +276,22 @@ export const campaignService = {
     const existing = await campaignRepository.findById(id);
     if (!existing) throw new NotFoundError("Campaign not found");
     if (existing.status !== "DRAFT" && existing.status !== "SCHEDULED") {
-      throw new ValidationError(
-        `Campaign cannot be edited in status ${existing.status}`,
-      );
+      if (existing.status === "FAILED") {
+        // 发送失败后，允许在重试前修正发送相关设置（发件人/回复地址/发送渠道）。
+        // 这些字段不影响已生成的收件人快照，可安全修改。
+        const illegal = Object.keys(input).filter(
+          (k) => !FAILED_EDITABLE_FIELDS.has(k),
+        );
+        if (illegal.length > 0) {
+          throw new ValidationError(
+            `Campaign in FAILED status only allows editing ${[...FAILED_EDITABLE_FIELDS].join(", ")} (got: ${illegal.join(", ")})`,
+          );
+        }
+      } else {
+        throw new ValidationError(
+          `Campaign cannot be edited in status ${existing.status}`,
+        );
+      }
     }
     const tpl = await templateService.getById(existing.templateId);
     const availableLocales = new Set(tpl.locales.map((locale) => locale.locale));
@@ -257,6 +323,18 @@ export const campaignService = {
     }
     if (input.utmParams !== undefined) {
       data.utmParams = input.utmParams ? (input.utmParams as Prisma.InputJsonValue) : Prisma.DbNull;
+    }
+
+    // 切换发送渠道但未显式填写发件人时，按新渠道的默认发件人重新解析，
+    // 与创建活动时"留空使用通道默认"语义保持一致。
+    if (input.sendingChannelId !== undefined && input.fromEmail === undefined) {
+      const resolved = await resolveCampaignFromEmail(
+        undefined,
+        input.sendingChannelId ?? null,
+      );
+      if (resolved && isValidFromHeader(resolved)) {
+        data.fromEmail = resolved;
+      }
     }
 
     const updated = await campaignRepository.update(id, data);
@@ -457,8 +535,62 @@ export const campaignService = {
     );
   },
 
+  /**
+   * 重试发送失败的活动：把失败 / 软退信的收件人重置为待发（清空重试计数与锁），
+   * 并将活动从 FAILED 切回 SENDING，由 worker 重新认领发送。
+   * 已成功（SENT/DELIVERED/OPENED/CLICKED）、硬退信、退订的收件人保持不变，
+   * 避免重复投递。
+   */
   async retry(id: string, ctx: ActorContext): Promise<Campaign> {
-    return this._transition(id, "FAILED", "SENDING", "retry", {}, ctx);
+    const existing = await campaignRepository.findById(id);
+    if (!existing) throw new NotFoundError("Campaign not found");
+    if (existing.status !== "FAILED") {
+      throw new ValidationError(
+        `Only FAILED campaigns can be retried; current status is ${existing.status}`,
+      );
+    }
+    assertTransition("FAILED", "SENDING", "retry");
+
+    await prisma.$transaction(async (tx) => {
+      await tx.campaignRecipient.updateMany({
+        where: {
+          campaignId: id,
+          status: { in: ["FAILED", "SOFT_BOUNCED"] },
+        },
+        data: {
+          status: "PENDING",
+          retryCount: 0,
+          lockedBy: null,
+          lockedAt: null,
+          failedAt: null,
+          nextRetryAt: null,
+        },
+      });
+      const count = await campaignRepository.transitionStatus(
+        id,
+        "FAILED",
+        "SENDING",
+        { failedCount: 0 },
+        tx,
+      );
+      if (count === 0) {
+        throw new ConflictError(
+          "Campaign status changed concurrently (expected FAILED)",
+        );
+      }
+    });
+
+    const fresh = await campaignRepository.findById(id);
+    if (!fresh) throw new NotFoundError("Campaign not found after retry");
+    audit({
+      action: "campaign.retry",
+      entityType: "Campaign",
+      entityId: id,
+      actorType: ctx.actorType,
+      details: { from: "FAILED", to: "SENDING" },
+      req: ctx.req ?? null,
+    });
+    return fresh;
   },
 
   async getLocaleCoverage(id: string): Promise<LocaleCoverageResult> {
